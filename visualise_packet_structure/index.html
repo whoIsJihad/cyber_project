@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PacketVision</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#00ff41;font-family:'Courier New',monospace}
+#scanlines{position:fixed;top:0;left:0;width:100%;height:100%;background:repeating-linear-gradient(0deg,rgba(0,0,0,0.12) 0px,rgba(0,0,0,0.12) 1px,transparent 1px,transparent 3px);pointer-events:none;z-index:999}
+.container{max-width:1200px;margin:0 auto;padding:20px}
+h1{text-align:center;font-size:22px;letter-spacing:8px;text-transform:uppercase;margin-bottom:3px;text-shadow:0 0 10px #00ff41;animation:fk 3s infinite}
+@keyframes fk{0%,95%,100%{opacity:1}96%{opacity:.8}97%{opacity:1}98%{opacity:.7}}
+.subtitle{text-align:center;color:#008f11;font-size:12px;margin-bottom:20px;letter-spacing:3px}
+.tabs{display:flex;justify-content:center;gap:6px;margin-bottom:20px;flex-wrap:wrap}
+.tab{padding:10px 20px;background:#111;border:1px solid #00ff41;color:#00ff41;cursor:pointer;font-family:'Courier New',monospace;font-size:12px;text-transform:uppercase;letter-spacing:2px;transition:all .15s}
+.tab:hover{background:#00ff41;color:#000}
+.tab.active{background:#00ff41;color:#000;box-shadow:0 0 12px #00ff41}
+.section{display:none}.section.active{display:block}
+.packet-canvas{margin:20px 0;padding:15px;border:1px solid #00ff41;background:rgba(0,255,65,0.02);overflow-x:auto}
+.packet-canvas h3{color:#00ff41;font-size:13px;margin-bottom:15px;letter-spacing:2px;text-transform:uppercase}
+.pf{border:1px solid #004400;padding:6px 10px;margin:2px 0;cursor:pointer;transition:all .15s;display:flex;justify-content:space-between;align-items:center}
+.pf:hover{background:rgba(0,255,65,0.1);box-shadow:0 0 8px rgba(0,255,65,0.3)}
+.pf.selected{background:rgba(0,255,65,0.2)!important;border-color:#00ff41;box-shadow:inset 0 0 15px rgba(0,255,65,0.3)}
+.pf-name{font-size:12px;color:#00ff41;font-weight:bold}
+.pf-meta{font-size:10px;color:#008f11}
+.layer-box{border:2px solid;margin:8px 0;padding:0;position:relative}
+.layer-box:hover{box-shadow:0 0 15px rgba(0,255,65,0.2)}
+.eth-box{border-color:#00ff41;background:rgba(0,255,65,0.02)}
+.ip-box{border-color:#ff8800;background:rgba(255,136,0,0.02)}
+.tcp-box{border-color:#0088ff;background:rgba(0,136,255,0.02)}
+.pl-box{border-color:#aa00ff;border-style:dashed;background:rgba(170,0,255,0.02)}
+.layer-header{text-align:center;font-size:11px;font-weight:bold;letter-spacing:3px;padding:6px;text-transform:uppercase}
+.eth-h{background:rgba(0,255,65,0.12);color:#00ff41;border-bottom:1px solid #00ff41}
+.ip-h{background:rgba(255,136,0,0.12);color:#ff8800;border-bottom:1px solid #ff8800}
+.tcp-h{background:rgba(0,136,255,0.12);color:#0088ff;border-bottom:1px solid #0088ff}
+.pl-h{background:rgba(170,0,255,0.12);color:#aa00ff;border-bottom:1px dashed #aa00ff}
+.layer-size{font-size:9px;color:#006600;text-align:center;padding:2px}
+.legend{display:flex;justify-content:center;gap:15px;margin:10px 0 20px;flex-wrap:wrap}
+.li{display:flex;align-items:center;gap:5px;font-size:10px;color:#008f11}
+.lc{width:14px;height:14px;border:1px solid}
+.total-size{text-align:center;margin:12px 0;font-size:13px;color:#008f11}
+.total-size span{color:#00ff41;font-weight:bold}
+.info-panel{margin-top:15px;border:1px solid #00ff41;background:rgba(0,255,65,0.05);padding:15px;min-height:120px}
+.info-panel h3{color:#00ff41;font-size:13px;margin-bottom:8px;letter-spacing:2px}
+.info-panel .ft{color:#00ff41;font-size:16px;font-weight:bold;margin-bottom:6px}
+.info-panel .desc{color:#00aa2a;font-size:12px;line-height:1.7}
+.flag-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:15px}
+.flag-card{border:1px solid #008f11;padding:12px;background:rgba(0,255,65,0.03);cursor:pointer;transition:all .15s}
+.flag-card:hover{background:rgba(0,255,65,0.1)}
+.flag-card .fn{color:#00ff41;font-weight:bold;font-size:13px;margin-bottom:4px}
+.flag-card .fv{color:#008f11;font-size:11px}
+.flag-card .fd{color:#00aa2a;font-size:11px;margin-top:6px;line-height:1.5}
+.option-table{width:100%;border-collapse:collapse;margin-top:15px}
+.option-table th,.option-table td{border:1px solid #008f11;padding:8px 10px;text-align:left;font-size:11px}
+.option-table th{background:rgba(0,255,65,0.1);color:#00ff41}
+.option-table td{color:#00aa2a}
+.option-table .on{color:#00ff41;font-weight:bold}
+.footer{text-align:center;margin-top:25px;color:#006600;font-size:10px;letter-spacing:2px}
+</style>
+</head>
+<body>
+<div id="scanlines"></div>
+<div class="container">
+  <h1>// PacketVision</h1>
+  <div class="subtitle">_ PACKET ENCAPSULATION VISUALIZER _</div>
+  <div class="tabs">
+    <div class="tab active" onclick="showSection('full',this)">Full Packet</div>
+    <div class="tab" onclick="showSection('ip',this)">IP Header</div>
+    <div class="tab" onclick="showSection('tcp',this)">TCP Header</div>
+    <div class="tab" onclick="showSection('flags',this)">TCP Flags</div>
+    <div class="tab" onclick="showSection('options',this)">IP Options</div>
+  </div>
+
+  <div id="sec-full" class="section active">
+    <div class="legend">
+      <div class="li"><div class="lc" style="background:#003300;border-color:#00ff41"></div>Ethernet (14B)</div>
+      <div class="li"><div class="lc" style="background:#331100;border-color:#ff8800"></div>IPv4 (20B)</div>
+      <div class="li"><div class="lc" style="background:#001133;border-color:#0088ff"></div>TCP (20B)</div>
+      <div class="li"><div class="lc" style="background:#110033;border-color:#aa00ff"></div>Payload</div>
+    </div>
+    <div class="packet-canvas" id="full-canvas"></div>
+    <div class="total-size">Full Frame: <span id="full-total">~66 bytes (with 1500B payload)</span></div>
+    <div class="info-panel" id="full-info"><h3>> SELECT ANY FIELD TO VIEW DETAILS</h3></div>
+  </div>
+
+  <div id="sec-ip" class="section">
+    <div class="legend">
+      <div class="li"><div class="lc" style="background:#002200"></div>Version (4b)</div>
+      <div class="li"><div class="lc" style="background:#002800"></div>IHL (4b)</div>
+      <div class="li"><div class="lc" style="background:#003000"></div>DSCP (6b)</div>
+      <div class="li"><div class="lc" style="background:#003800"></div>ECN (2b)</div>
+      <div class="li"><div class="lc" style="background:#004400"></div>Total Length (16b)</div>
+      <div class="li"><div class="lc" style="background:#004e00"></div>Identification (16b)</div>
+      <div class="li"><div class="lc" style="background:#005800"></div>Flags (3b)</div>
+      <div class="li"><div class="lc" style="background:#006200"></div>Frag Offset (13b)</div>
+      <div class="li"><div class="lc" style="background:#006c00"></div>TTL (8b)</div>
+      <div class="li"><div class="lc" style="background:#007600"></div>Protocol (8b)</div>
+      <div class="li"><div class="lc" style="background:#008000"></div>Checksum (16b)</div>
+      <div class="li"><div class="lc" style="background:#008a00"></div>Source IP (32b)</div>
+      <div class="li"><div class="lc" style="background:#009400"></div>Dest IP (32b)</div>
+    </div>
+    <div class="packet-canvas" id="ip-canvas"></div>
+    <div class="total-size">IPv4 Header: <span id="ip-total">20 bytes (160 bits)</span></div>
+    <div class="info-panel" id="ip-info"><h3>> SELECT A FIELD TO VIEW DETAILS</h3></div>
+  </div>
+
+  <div id="sec-tcp" class="section">
+    <div class="legend">
+      <div class="li"><div class="lc" style="background:#001133"></div>Src Port (16b)</div>
+      <div class="li"><div class="lc" style="background:#001833"></div>Dst Port (16b)</div>
+      <div class="li"><div class="lc" style="background:#002233"></div>Sequence (32b)</div>
+      <div class="li"><div class="lc" style="background:#002833"></div>Ack Number (32b)</div>
+      <div class="li"><div class="lc" style="background:#003033"></div>Data Offset (4b)</div>
+      <div class="li"><div class="lc" style="background:#003833"></div>Flags (8b)</div>
+      <div class="li"><div class="lc" style="background:#004033"></div>Window (16b)</div>
+      <div class="li"><div class="lc" style="background:#004833"></div>Checksum (16b)</div>
+      <div class="li"><div class="lc" style="background:#005033"></div>Urgent (16b)</div>
+      <div class="li"><div class="lc" style="background:#005833"></div>Options (variable)</div>
+    </div>
+    <div class="packet-canvas" id="tcp-canvas"></div>
+    <div class="total-size">TCP Header: <span id="tcp-total">20 bytes minimum (160 bits)</span></div>
+    <div class="info-panel" id="tcp-info"><h3>> SELECT A FIELD TO VIEW DETAILS</h3></div>
+  </div>
+
+  <div id="sec-flags" class="section">
+    <h2 style="color:#00ff41;text-align:center;margin-bottom:15px;letter-spacing:3px;">_ TCP CONTROL FLAGS _</h2>
+    <div class="packet-canvas" id="flags-canvas"></div>
+    <div class="flag-grid" id="flags-grid"></div>
+    <div class="info-panel" id="flags-info"><h3>> SELECT A FLAG TO VIEW DETAILS</h3></div>
+  </div>
+
+  <div id="sec-options" class="section">
+    <h2 style="color:#00ff41;text-align:center;margin-bottom:15px;letter-spacing:3px;">_ IP HEADER OPTIONS _</h2>
+    <table class="option-table">
+      <thead><tr><th>Option Type</th><th>Code</th><th>Length</th><th>Description</th></tr></thead>
+      <tbody id="options-body"></tbody>
+    </table>
+  </div>
+
+  <div class="footer">$ PacketVision v3.0 // RETR0 TERMINAL // ALL RIGHTS RESERVED //</div>
+</div>
+
+<script>
+const IP_FIELDS=[
+  {name:'Version',bits:'4 bits',desc:'IP version. Currently IPv4 (value = 4). Identifies the protocol version used in the header.'},
+  {name:'IHL',bits:'4 bits',desc:'Internet Header Length. Header length in 32-bit words. Min = 5 (20 bytes), Max = 15 (60 bytes). Most common = 5.'},
+  {name:'DSCP',bits:'6 bits',desc:'Differentiated Services Code Point. QoS classification bits. Determines packet priority.'},
+  {name:'ECN',bits:'2 bits',desc:'Explicit Congestion Notification. Enables end-to-end congestion notification. ECN=11 means CE.'},
+  {name:'Total Length',bits:'16 bits',desc:'Total packet length (header + data) in bytes. Max = 65535. Min for IPv4 = 576 bytes.'},
+  {name:'Identification',bits:'16 bits',desc:'Unique ID for fragment reassembly. Same ID shared across all fragments of the same packet.'},
+  {name:'Flags',bits:'3 bits',desc:'DF (Don\'t Fragment), MF (More Fragments), Reserved. DF=1 means router must not fragment.'},
+  {name:'Frag Offset',bits:'13 bits',desc:'Fragment position in 8-byte units. Tells where this fragment belongs in original packet.'},
+  {name:'TTL',bits:'8 bits',desc:'Time To Live. Max hops before discard. Decremented by 1 at each router. Common: 64, 128, 255.'},
+  {name:'Protocol',bits:'8 bits',desc:'Next-level protocol. 6=TCP, 17=UDP, 1=ICMP, 89=OSPF. Tells destination what payload type follows.'},
+  {name:'Checksum',bits:'16 bits',desc:'Header error-checking. Ones\' complement sum of all 16-bit words. Recalculated at every hop.'},
+  {name:'Source IP',bits:'32 bits',desc:'32-bit sender IP address. Identifies the originating host. Written in dotted decimal (e.g., 192.168.1.1).'},
+  {name:'Dest IP',bits:'32 bits',desc:'32-bit destination IP address. Identifies the target host for the packet.'}
+];
+
+const TCP_FIELDS=[
+  {name:'Src Port',bits:'16 bits',desc:'Source port identifying the sending application. Range 0-65535. Well-known: 80, 443, 22.'},
+  {name:'Dst Port',bits:'16 bits',desc:'Destination port identifying the receiving application. Determines which service handles the packet.'},
+  {name:'Sequence',bits:'32 bits',desc:'Sequence number of first data byte. During SYN, this is the Initial Sequence Number (ISN).'},
+  {name:'Ack Number',bits:'32 bits',desc:'Next expected sequence number. Valid only when ACK flag is set.'},
+  {name:'Data Offset',bits:'4 bits',desc:'TCP header length in 32-bit words. Min = 5 (20 bytes), Max = 15 (60 bytes).'},
+  {name:'Reserved',bits:'3 bits',desc:'Reserved for future use. Must be zero.'},
+  {name:'NS',bits:'1 bit',desc:'Nonce-Sum. Experimental ECN nonce support. Rarely used.'},
+  {name:'CWR',bits:'1 bit',desc:'Congestion Window Reduced. Sender received ECE flag and responded to congestion.'},
+  {name:'ECE',bits:'1 bit',desc:'ECN-Echo. SYN=1: ECN capable. SYN=0: received CE-marked packet.'},
+  {name:'URG',bits:'1 bit',desc:'Urgent pointer field significant. Out-of-band data requiring immediate processing.'},
+  {name:'ACK',bits:'1 bit',desc:'Acknowledgment field valid. Almost all packets after initial SYN have ACK=1.'},
+  {name:'PSH',bits:'1 bit',desc:'Push Function. Forces data to application immediately without waiting for buffer.'},
+  {name:'RST',bits:'1 bit',desc:'Reset connection. Abruptly terminates connection. Often used in SYN flood attacks.'},
+  {name:'SYN',bits:'1 bit',desc:'Synchronize sequence numbers. Initiates connection in 3-way handshake (SYN, SYN-ACK, ACK).'},
+  {name:'FIN',bits:'1 bit',desc:'Finish connection. Sender has no more data. Part of 4-way connection termination.'},
+  {name:'Window',bits:'16 bits',desc:'Bytes sender is willing to accept. Critical for flow control. Larger = faster transfer.'},
+  {name:'Checksum',bits:'16 bits',desc:'Error-checking for entire TCP segment. More comprehensive than IP checksum.'},
+  {name:'Urgent Ptr',bits:'16 bits',desc:'Points to last urgent data byte when URG=1.'},
+  {name:'Options',bits:'variable',desc:'TCP options: MSS, Window Scale, SACK, Timestamps, NOP padding. Pads to 32-bit boundary.'}
+];
+
+const TCP_FLAGS=[
+  {name:'FIN',value:'1',byte:'Byte 13, bit 0',desc:'Finish - Sender has no more data. Initiates connection termination (part of 4-way handshake).',color:'#ff4444'},
+  {name:'SYN',value:'1',byte:'Byte 13, bit 1',desc:'Synchronize - Initiates a connection. Contains the initial sequence number (ISN).',color:'#ff8800'},
+  {name:'RST',value:'1',byte:'Byte 13, bit 2',desc:'Reset - Aborts connection immediately. No graceful shutdown. Often used in SYN flood attacks.',color:'#ffcc00'},
+  {name:'PSH',value:'1',byte:'Byte 13, bit 3',desc:'Push - Forces buffered data to application immediately. Common in telnet/SSH.',color:'#44ff44'},
+  {name:'ACK',value:'1',byte:'Byte 13, bit 4',desc:'Acknowledgment - Ack field is valid. Nearly all packets after handshake carry ACK=1.',color:'#00aaff'},
+  {name:'URG',value:'1',byte:'Byte 13, bit 5',desc:'Urgent - Urgent pointer field is valid. Out-of-band data processed immediately. Rarely used.',color:'#aa00ff'},
+  {name:'ECE',value:'1',byte:'Byte 13, bit 6',desc:'ECN-Echo - SYN=1: ECN capable. SYN=0: received CE-marked packet.',color:'#ff00aa'},
+  {name:'CWR',value:'1',byte:'Byte 13, bit 7',desc:'Congestion Window Reduced - Sender reduced congestion window in response to ECN notification.',color:'#00ffff'}
+];
+
+const IP_OPTIONS=[
+  {name:'End of Option List (EOOL)',code:'0',length:'0 bytes',desc:'Marks end of options list. Value 0x00.'},
+  {name:'No Operation (NOP)',code:'1',length:'1 byte',desc:'Padding for 32-bit alignment. Value 0x01.'},
+  {name:'Security',code:'130',length:'Variable',desc:'Security and compartmentation parameters. Military/intelligence use. Rarely used today.'},
+  {name:'Loose Source Route',code:'131',length:'Variable',desc:'List of IP addresses packet must pass through. Each address is a "loose" hop.'},
+  {name:'Timestamp',code:'136',length:'Variable',desc:'Records timestamps of each router processing the packet. Used for diagnostics.'},
+  {name:'Record Route',code:'137',length:'Variable',desc:'Records IP addresses of each forwarding router. Traces the actual packet path.'},
+  {name:'Stream ID',code:'136',length:'2 bytes',desc:'Obsolete. Was for IBM parallel processors.'},
+  {name:'Router Alert',code:'148',length:'4 bytes',desc:'Alerts routers to examine packet even if normally ignored. Used by RSVP.'},
+  {name:'MTU Probe',code:'68',length:'Variable',desc:'Part of Path MTU Discovery. Probe packet to determine MTU along a path.'},
+  {name:'MTU Reply',code:'69',length:'Variable',desc:'Reply containing next-hop MTU.'},
+  {name:'Quick-Start',code:'25',length:'Variable',desc:'Requests specific sending rate from routers along path.'},
+  {name:'Address Extension',code:'150',length:'Variable',desc:'Obsolete IPv6-related extended addressing.'}
+];
+
+const ETH_FIELDS=[
+  {name:'Dst MAC',bits:'48 bits',desc:'48-bit destination MAC address. Identifies the next-hop network interface.'},
+  {name:'Src MAC',bits:'48 bits',desc:'48-bit source MAC address. Identifies the sending network interface.'},
+  {name:'EtherType',bits:'16 bits',desc:'Identifies the payload protocol. 0x0800=IPv4, 0x0806=ARP, 0x86DD=IPv6.'}
+];
+
+const PAYLOAD_INFO={name:'Payload',bits:'variable',desc:'The actual data carried by the packet. For a web request, this is the HTTP request (headers + body). Typically 46-1500 bytes.'};
+
+function buildFull(){
+  const canvas=document.getElementById('full-canvas');
+  canvas.innerHTML='';
+
+  function makeFieldItem(name,bits,layer,idx){
+    const d=document.createElement('div');
+    d.className='pf';
+    d.onclick=()=>selectLayer(layer,idx);
+    d.innerHTML=`<span class="pf-name">${name}</span><span class="pf-meta">${bits}</span>`;
+    return d;
+  }
+
+  // Ethernet box
+  const eth=document.createElement('div');
+  eth.className='layer-box eth-box';
+  const ethH=document.createElement('div');ethH.className='layer-header eth-h';ethH.textContent='ETHERNET FRAME (14 bytes)';eth.appendChild(ethH);
+  ETH_FIELDS.forEach((f,i)=>eth.appendChild(makeFieldItem(f.name,f.bits,'eth',i)));
+  canvas.appendChild(eth);
+
+  // IP box (nested inside Ethernet)
+  const ip=document.createElement('div');
+  ip.className='layer-box ip-box';
+  const ipH=document.createElement('div');ipH.className='layer-header ip-h';ipH.textContent='IP HEADER (20 bytes min / 160 bits)';ip.appendChild(ipH);
+  IP_FIELDS.forEach((f,i)=>ip.appendChild(makeFieldItem(f.name,f.bits,'ip',i)));
+  canvas.appendChild(ip);
+
+  // TCP box (nested inside IP)
+  const tcp=document.createElement('div');
+  tcp.className='layer-box tcp-box';
+  const tcpH=document.createElement('div');tcpH.className='layer-header tcp-h';tcpH.textContent='TCP HEADER (20 bytes min / 160 bits)';tcp.appendChild(tcpH);
+  TCP_FIELDS.forEach((f,i)=>tcp.appendChild(makeFieldItem(f.name,f.bits,'tcp',i)));
+  canvas.appendChild(tcp);
+
+  // Payload box (nested inside TCP)
+  const pl=document.createElement('div');
+  pl.className='layer-box pl-box';
+  const plH=document.createElement('div');plH.className='layer-header pl-h';plH.textContent='PAYLOAD (DATA)';pl.appendChild(plH);
+  const pld=document.createElement('div');pld.className='pf';pld.onclick=()=>selectLayer('payload',0);
+  pld.innerHTML=`<span class="pf-name" style="color:#aa00ff">Payload</span><span class="pf-meta" style="color:#aa00ff">variable</span>`;
+  pl.appendChild(pld);
+  canvas.appendChild(pl);
+
+  canvas.onclick=(e)=>{
+    const el=e.target.closest('.pf');
+    if(!el){document.getElementById('full-info').innerHTML='<h3>> CLICK ANY FIELD FOR DETAILS</h3>';return;}
+    selectLayer(el.dataset.layer,parseInt(el.dataset.idx));
+  };
+}
+
+function selectLayer(layer,idx){
+  const info=document.getElementById('full-info');
+  let f,label,color;
+  if(layer==='eth'){f=ETH_FIELDS[idx];label='ETHERNET';color='#00ff41'}
+  else if(layer==='ip'){f=IP_FIELDS[idx];label='IP';color='#ff8800'}
+  else if(layer==='tcp'){f=TCP_FIELDS[idx];label='TCP';color='#0088ff'}
+  else{f=PAYLOAD_INFO;label='PAYLOAD';color='#aa00ff'}
+
+  document.querySelectorAll('.pf.selected').forEach(el=>el.classList.remove('selected'));
+  const sel=document.querySelector(`.pf[data-layer="${layer}"][data-idx="${idx}"]`);
+  if(sel)sel.classList.add('selected');
+
+  info.innerHTML=`<div class="ft" style="color:${color}">${label} > ${f.name}</div><div class="desc">${f.desc}</div><br><div style="color:#006600;font-size:11px;">Size: ${f.bits}</div>`;
+}
+
+function renderIPPacket(){
+  const canvas=document.getElementById('ip-canvas');
+  canvas.innerHTML='';
+  const bar=document.createElement('div');bar.style.cssText='background:#ff8800;color:#000;text-align:center;font-size:12px;font-weight:bold;padding:5px;margin-bottom:10px';bar.textContent=' IPV4 HEADER ';canvas.appendChild(bar);
+  IP_FIELDS.forEach((f,i)=>{
+    const el=document.createElement('div');el.className='pf';el.onclick=()=>selectIP(i);
+    el.style.borderColor='#884400';el.style.background='rgba(255,136,0,0.05)';
+    el.innerHTML=`<span class="pf-name">${f.name}</span><span class="pf-meta">${f.bits}</span>`;
+    canvas.appendChild(el);
+  });
+  document.getElementById('ip-total').textContent='IPv4 Header: 20 bytes (160 bits) minimum';
+}
+
+function selectIP(idx){
+  const f=IP_FIELDS[idx];
+  document.querySelectorAll('.pf.selected').forEach(el=>el.classList.remove('selected'));
+  const sel=document.querySelector(`#ip-canvas .pf:nth-child(${idx+2})`);
+  if(sel)sel.classList.add('selected');
+  const info=document.getElementById('ip-info');
+  info.innerHTML=`<div class="ft">${f.name}</div><div class="desc">${f.desc}</div><br><div style="color:#006600;font-size:11px;">Size: ${f.bits}</div>`;
+}
+
+function renderTCPPacket(){
+  const canvas=document.getElementById('tcp-canvas');
+  canvas.innerHTML='';
+  const bar=document.createElement('div');bar.style.cssText='background:#0088ff;color:#fff;text-align:center;font-size:12px;font-weight:bold;padding:5px;margin-bottom:10px';bar.textContent=' TCP HEADER ';canvas.appendChild(bar);
+  TCP_FIELDS.forEach((f,i)=>{
+    const el=document.createElement('div');el.className='pf';el.onclick=()=>selectTCP(i);
+    el.style.borderColor='#004488';el.style.background='rgba(0,136,255,0.05)';
+    el.innerHTML=`<span class="pf-name">${f.name}</span><span class="pf-meta">${f.bits}</span>`;
+    canvas.appendChild(el);
+  });
+  document.getElementById('tcp-total').textContent='TCP Header: 20 bytes minimum (160 bits)';
+}
+
+function selectTCP(idx){
+  const f=TCP_FIELDS[idx];
+  document.querySelectorAll('.pf.selected').forEach(el=>el.classList.remove('selected'));
+  const sel=document.querySelector(`#tcp-canvas .pf:nth-child(${idx+2})`);
+  if(sel)sel.classList.add('selected');
+  const info=document.getElementById('tcp-info');
+  info.innerHTML=`<div class="ft">${f.name}</div><div class="desc">${f.desc}</div><br><div style="color:#006600;font-size:11px;">Size: ${f.bits}</div>`;
+}
+
+function showFlagsVisual(){
+  const canvas=document.getElementById('flags-canvas');canvas.innerHTML='';
+  const row=document.createElement('div');row.style.cssText='display:flex;gap:0;margin:10px 0';
+  const before=document.createElement('div');before.style.cssText='background:rgba(0,136,255,0.05);border:1px solid #004488;display:flex;justify-content:center;align-items:center;font-size:10px;color:#0088ff';before.style.width='100px';before.style.minWidth='100px';before.textContent='Bytes 0-12';row.appendChild(before);
+  const fb=document.createElement('div');fb.style.cssText='display:flex;border:2px solid #00ff41;background:rgba(0,255,65,0.08)';
+  TCP_FLAGS.forEach((f,i)=>{
+    const b=document.createElement('div');b.style.cssText='width:40px;border-right:1px solid rgba(0,255,65,0.3);display:flex;flex-direction:column;justify-content:center;align-items:center;cursor:pointer;padding:8px 3px';b.className='pf';b.dataset.field='flags-'+i;b.onclick=()=>selectFlag(i);
+    b.innerHTML=`<span class="pf-name" style="font-size:11px;color:${f.color}">${f.name}</span><span style="color:${f.color};font-size:9px;font-weight:bold">${f.value}</span>`;
+    fb.appendChild(b);
+  });
+  row.appendChild(fb);
+  const after=document.createElement('div');after.style.cssText='background:rgba(0,136,255,0.05);border:1px solid #004488;display:flex;justify-content:center;align-items:center;font-size:10px;color:#0088ff';after.style.width='40px';after.style.minWidth='40px';after.textContent='Bytes 14-15';row.appendChild(after);
+  canvas.appendChild(row);
+}
+
+function renderFlagsGrid(){
+  const grid=document.getElementById('flags-grid');grid.innerHTML='';
+  TCP_FLAGS.forEach((f,i)=>{
+    const card=document.createElement('div');card.className='flag-card';card.onclick=()=>selectFlag(i);
+    card.innerHTML=`<div class="fn" style="color:${f.color}">${f.name} (${f.value})</div><div class="fv">Position: ${f.byte}</div><div class="fd">${f.desc}</div>`;grid.appendChild(card);
+  });
+}
+
+function showFlagsInfo(idx){
+  const f=TCP_FLAGS[idx];const info=document.getElementById('flags-info');
+  info.innerHTML=`<div class="ft" style="color:${f.color}">${f.name} Flag (${f.value})</div><div style="color:#008f11;margin-bottom:8px;">Position: ${f.byte}</div><div class="desc">${f.desc}</div>`;
+}
+
+function selectFlag(idx){
+  showFlagsInfo(idx);
+  document.querySelectorAll('.pf.selected').forEach(el=>el.classList.remove('selected'));
+  const sel=document.querySelector(`.pf[data-field="flags-${idx}"]`);
+  if(sel)sel.classList.add('selected');
+}
+
+function renderOptionsTable(){
+  const tbody=document.getElementById('options-body');tbody.innerHTML='';
+  IP_OPTIONS.forEach(opt=>{
+    const tr=document.createElement('tr');tr.innerHTML=`<td class="on">${opt.name}</td><td>${opt.code}</td><td>${opt.length}</td><td>${opt.desc}</td>`;tbody.appendChild(tr);
+  });
+}
+
+function showSection(name,el){
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('sec-'+name).classList.add('active');el.classList.add('active');
+}
+
+buildFull();
+renderIPPacket();
+renderTCPPacket();
+showFlagsVisual();
+renderFlagsGrid();
+renderOptionsTable();
+</script>
+</body>
+</html>

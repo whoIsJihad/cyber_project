@@ -1,0 +1,29 @@
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Generated experiment output
+results/
+remote_results/
+sessions/
+*.pcap
+*.pcapng
+*.csv
+*.log
+
+# Local scratch files
+.tmp
+*.tmp
+*.bak
+*.swp
+
+# Local editor and OS files
+.vscode/
+.idea/
+.DS_Store
