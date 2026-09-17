@@ -1,20 +1,10 @@
 #!/usr/bin/env bash
 
-# WHAT THIS SCRIPT DOES (in order)
-# 1. Saves the receiver's current SYN-cookie and queue-limit settings.
-# 2. Copies the current client/server code to the two isolated lab VMs.
-# 3. Repeats baseline, protected, and unprotected conditions five times each.
-# 4. Rotates their order so time alone cannot favour one condition.
-# 5. Uses the same small half-open queue limit for every comparison trial.
-# 6. Starts the receiver monitor for each trial.
-# 7. Each SYN trial requests 750,000 SYNs: 10,000/second for 75 seconds.
-# 8. Waits up to 20 seconds for a cookie/drop counter to prove pressure.
-# 9. Runs HTTP for 30 seconds: 20 workers, no pause, request count varies.
-# 10. Saves HTTP, monitor, generator, and TCP-counter evidence per trial.
-# 11. Writes every trial to comparison.csv and median results to summary.txt.
-# 12. Expected total time is about 30–35 minutes, including VM overhead.
-# 13. Restores the receiver's original kernel settings before exiting.
-# A missed pressure check is recorded; it does not cancel the remaining trials.
+# Runs two trials per condition with the same HTTP workload and SYN rate.
+# Starts continuous SYN sending before HTTP and stops it after measurement.
+# No queue-drain waits; later trials can contain leftover connections.
+# Saves overlap checks and rejects a trial if sending finishes before HTTP.
+# Restores the original receiver kernel settings on exit.
 
 # Compare no-SYN, SYN-cookie, and no-cookie conditions in the isolated lab.
 # Run from the project root. This script changes only running receiver kernel
@@ -34,19 +24,27 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)"
 local_results="results/defense-comparison-$run_id"
 
 # One HTTP shape, repeated rather than many short concurrent profiles.
-trials_per_condition=2 #5 default
-http_duration_seconds=20 #30 default
+trials_per_condition=2
+http_duration_seconds=20
 http_concurrency=20
 http_timeout_seconds=2
 
 # Same SYN workload in protected and unprotected trials.
-syn_duration_seconds=7 #75 default  
-syn_rate=100000 #10000 default 
+syn_rate=1000
+# One raw-socket process tops out around 800-1000 pkt/s; several processes are
+# needed to actually push the requested rate and put real pressure on the queue.
+syn_workers=8
 pressure_gate_timeout_seconds=20
-generator_finish_timeout_seconds=180
-
 # A small queue makes the defense choice observable. It is restored on exit.
-comparison_syn_backlog=16
+# On this kernel, net.ipv4.tcp_max_syn_backlog does NOT bound the real queue
+# any more (verified by hand: even at sysctl value 16, nginx's own listen()
+# backlog of 511 stayed the effective limit). The only thing that actually
+# shrinks the queue is nginx's own `listen ... backlog=N`. 8 was picked by
+# testing: with this backlog, syncookies=1 kept every request succeeding and
+# syncookies=0 timed out every request — a clean, real difference.
+comparison_syn_backlog=8
+nginx_site_conf="/etc/nginx/sites-available/default"
+nginx_conf_backup="/tmp/syn-lab-nginx-default-$$.bak"
 
 original_syncookies=""
 original_syn_backlog=""
@@ -73,35 +71,51 @@ stop_trial_processes() {
         current_monitor_pid=""
     fi
     if [[ -n "$current_generator_pid" ]]; then
-        ssh "$sender" "kill $current_generator_pid 2>/dev/null || true" || true
-        current_generator_pid=""
+        ssh "$sender" "printf '%s\\n' '$sender_sudo_password' | sudo -S -p '' kill $current_generator_pid 2>/dev/null || true" || true
+        for attempt in {1..50}; do
+            if ! ssh "$sender" "ps -p $current_generator_pid -o stat= | grep -q '^[^Z]'"; then
+                current_generator_pid=""
+                break
+            fi
+            sleep 0.1
+        done
+        if [[ -n "$current_generator_pid" ]]; then
+            echo "Generator did not stop; check sender PID $current_generator_pid." >&2
+            return 1
+        fi
     fi
 }
 
-wait_for_generator() {
-    local deadline=$((SECONDS + generator_finish_timeout_seconds))
-    while ssh "$sender" "kill -0 $current_generator_pid 2>/dev/null"; do
-        if (( SECONDS >= deadline )); then
-            echo "Generator did not finish within ${generator_finish_timeout_seconds}s." >&2
-            return 1
+wait_for_nginx_ready() {
+    local deadline=$((SECONDS + 10))
+    while (( SECONDS < deadline )); do
+        if ssh "$receiver" "systemctl is-active --quiet nginx && ss -H -ltn 'sport = :80' | grep -q LISTEN"; then
+            return 0
         fi
-        sleep 1
+        sleep 0.5
     done
-    current_generator_pid=""
+    echo "nginx did not come back up on port 80 after restart." >&2
+    return 1
 }
 
 restore_kernel_settings() {
     if [[ -n "$original_syncookies" && -n "$original_syn_backlog" ]]; then
-        echo "Restoring receiver kernel settings..."
+        echo "Restoring receiver kernel settings and nginx config..."
         sudo_receiver "/usr/sbin/sysctl -w net.ipv4.tcp_syncookies=$original_syncookies net.ipv4.tcp_max_syn_backlog=$original_syn_backlog" || true
+        sudo_receiver "cp $nginx_conf_backup $nginx_site_conf" || true
+        sudo_receiver "rm -f $nginx_conf_backup" || true
+        sudo_receiver "systemctl restart nginx" || true
+        wait_for_nginx_ready || true
     fi
 }
 
 cleanup() {
-    stop_trial_processes
+    stop_trial_processes || true
     restore_kernel_settings
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 wait_for_pressure() {
     local condition="$1"
@@ -171,6 +185,21 @@ ssh "$receiver" "pkill -f '[s]erver.monitor' 2>/dev/null || true; rm -rf ~/serve
 scp -r client "$sender:/home/snd/"
 scp -r server "$receiver:/home/recv/"
 
+# The queue size that actually matters is nginx's own `listen ... backlog=N`,
+# not net.ipv4.tcp_max_syn_backlog (verified by hand: that sysctl alone did
+# nothing on this kernel; nginx's default backlog of 511 stayed in force
+# through sysctl changes and even through `systemctl reload`). So back up the
+# site config, inject a small backlog into it, and restart (reload does not
+# recreate the listening socket, so it would not apply either) once, before
+# any trial. It is restored from the backup on exit.
+echo "Shrinking nginx's listen backlog to $comparison_syn_backlog so it takes effect..."
+sudo_receiver "cp $nginx_site_conf $nginx_conf_backup"
+sudo_receiver "sed -i -E 's/ ?backlog=[0-9]+//g; s/(listen [^;]*80[^;]*);/\\1 backlog=$comparison_syn_backlog;/' $nginx_site_conf"
+ssh "$receiver" "grep -n listen $nginx_site_conf"
+sudo_receiver "nginx -t"
+sudo_receiver "systemctl restart nginx"
+wait_for_nginx_ready
+
 conditions=(baseline protected unprotected)
 for trial in $(seq 1 "$trials_per_condition"); do
     # Rotate the order. Time-related VM variation therefore cannot always
@@ -181,17 +210,19 @@ for trial in $(seq 1 "$trials_per_condition"); do
         mkdir -p "$trial_dir"
         echo "Running $condition trial $trial of $trials_per_condition..."
 
-        # Baseline and protected both use the same small backlog. The only
-        # defense difference between protected and unprotected is syncookies.
+        # Backlog is already baked into nginx's listening socket (set once,
+        # above, before the loop). Only syncookies needs to change per trial,
+        # and that sysctl is read live on every SYN, so no restart is needed.
         syncookies=1
         [[ "$condition" == "unprotected" ]] && syncookies=0
-        sudo_receiver "/usr/sbin/sysctl -w net.ipv4.tcp_syncookies=$syncookies net.ipv4.tcp_max_syn_backlog=$comparison_syn_backlog"
+        sudo_receiver "/usr/sbin/sysctl -w net.ipv4.tcp_syncookies=$syncookies"
         ssh "$receiver" "nstat -az >$receiver_results/nstat-before-$run_id-$condition-$trial.txt"
 
         current_monitor_pid="$(ssh "$receiver" "cd ~; nohup python3 -m server.monitor --interval 0.1 --output $receiver_results/monitor-$run_id-$condition-$trial.csv </dev/null >/tmp/monitor-$run_id-$condition-$trial.log 2>&1 & echo \$!")"
         [[ "$current_monitor_pid" =~ ^[0-9]+$ ]] || { echo "Receiver monitor did not start." >&2; exit 1; }
         sleep 1
 
+        overlap="not-required"
         pressure_gate="not-required"
         if [[ "$condition" != "baseline" ]]; then
             if [[ "$condition" == "protected" ]]; then
@@ -199,18 +230,32 @@ for trial in $(seq 1 "$trials_per_condition"); do
             else
                 gate_counter="$(read_counter TcpExtListenDrops)"
             fi
-            current_generator_pid="$(ssh "$sender" "printf '%s\\n' '$sender_sudo_password' | sudo -S -p '' sh -c 'cd /home/snd && exec nohup python3 -m client.generator --duration $syn_duration_seconds --rate $syn_rate >/tmp/generator-$run_id-$condition-$trial.log 2>&1' & echo \$!")"
+            # sudo runs the short launcher in the foreground. The root shell
+            # detaches Python with all three streams redirected, then returns
+            # its actual PID immediately; no sudo wrapper holds SSH open.
+            current_generator_pid="$(ssh "$sender" "printf '%s\\n' '$sender_sudo_password' | sudo -S -p '' sh -c 'cd /home/snd || exit; nohup python3 -m client.generator --continuous --rate $syn_rate --workers $syn_workers </dev/null >/tmp/generator-$run_id-$condition-$trial.log 2>&1 & echo \$!'")"
             [[ "$current_generator_pid" =~ ^[0-9]+$ ]] || { echo "SYN generator did not start." >&2; exit 1; }
             if wait_for_pressure "$condition" "$gate_counter"; then
                 pressure_gate="passed"
             else
                 pressure_gate="not-observed"
             fi
+            if ! ssh "$sender" "ps -p $current_generator_pid -o stat= | grep -q '^[^Z]'"; then
+                echo "Generator ended before HTTP measurement; stopping this invalid comparison." >&2
+                exit 1
+            fi
+            overlap="passed"
+            printf 'generator_alive_before_http=true\n' > "$trial_dir/overlap.txt"
         fi
 
         ssh "$sender" "cd ~; python3 -m client.sustained_http_load --duration $http_duration_seconds --timeout $http_timeout_seconds --concurrency $http_concurrency --output $sender_results/http-$run_id-$condition-$trial.csv"
         if [[ "$condition" != "baseline" ]]; then
-            wait_for_generator
+            if ssh "$sender" "ps -p $current_generator_pid -o stat= | grep -q '^[^Z]'"; then
+                printf 'generator_alive_after_http=true\n' >> "$trial_dir/overlap.txt"
+            else
+                overlap="failed"
+                printf 'generator_alive_after_http=false\n' >> "$trial_dir/overlap.txt"
+            fi
         fi
         stop_trial_processes
         ssh "$receiver" "nstat -az >$receiver_results/nstat-after-$run_id-$condition-$trial.txt"
@@ -223,53 +268,17 @@ for trial in $(seq 1 "$trials_per_condition"); do
             scp "$sender:/tmp/generator-$run_id-$condition-$trial.log" "$trial_dir/generator.log"
         fi
 
+        if [[ "$overlap" == "failed" ]]; then
+            echo "Generator ended during HTTP measurement. Evidence saved in $trial_dir; comparison rejected." >&2
+            exit 1
+        fi
+
         IFS=, read -r total success failed timeouts median p95 peak cookies drops <<< "$(summarize_trial "$trial_dir")"
         printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$condition" "$trial" "$pressure_gate" "$total" "$success" "$failed" "$timeouts" "$median" "$p95" "$peak" "$cookies" "$drops" >> "$local_results/comparison.csv"
     done
 done
 
-python3 - "$local_results/comparison.csv" <<'PY' | tee "$local_results/RESULT.txt"
-import csv
-from collections import defaultdict
-from pathlib import Path
-import statistics
-import sys
-
-rows = list(csv.DictReader(Path(sys.argv[1]).open(encoding="utf-8", newline="")))
-groups = defaultdict(list)
-for row in rows:
-    groups[row["condition"]].append(row)
-print("SYN LAB RESULT")
-print("These are typical results across the completed trials.")
-for condition in ("baseline", "protected", "unprotected"):
-    group = groups[condition]
-    values = lambda name: [float(row[name]) for row in group]
-    total = statistics.median(values("total"))
-    success = statistics.median(values("success"))
-    failed = statistics.median(values("failed"))
-    timeouts = statistics.median(values("timeouts"))
-    median_ms = statistics.median(values("median_ms"))
-    p95_ms = statistics.median(values("p95_ms"))
-    peak = statistics.median(values("peak_syn_recv"))
-    cookies = statistics.median(values("syncookies_sent"))
-    drops = statistics.median(values("listen_drops"))
-    print(f"\n{condition.upper()}")
-    print(f"  Web requests: {success:.0f}/{total:.0f} succeeded; {failed:.0f} failed; {timeouts:.0f} timed out.")
-    print(f"  Latency: usually {median_ms:.2f} ms; slower requests reached {p95_ms:.2f} ms.")
-    if condition == "protected":
-        print(f"  Linux kept about {peak:.0f} unfinished connections and sent about {cookies:.0f} SYN cookies.")
-    elif condition == "unprotected":
-        print(f"  Linux kept about {peak:.0f} unfinished connections and dropped about {drops:.0f} extra SYNs.")
-
-protected_failures = statistics.median([float(row["failed"]) for row in groups["protected"]])
-unprotected_failures = statistics.median([float(row["failed"]) for row in groups["unprotected"]])
-print("\nPLAIN CONCLUSION")
-if protected_failures == 0 and unprotected_failures == 0:
-    print("Normal HTTP stayed available. Cookies handled excess SYNs when enabled; Linux dropped excess SYNs when disabled.")
-else:
-    print("At least one condition caused HTTP failures. Compare that condition with BASELINE above.")
-print("Ignore comparison.csv unless you are debugging a failed or unusual run.")
-PY
+python3 scripts/summarize_comparison.py "$local_results/comparison.csv" | tee "$local_results/RESULT.txt"
 
 echo "Evidence saved in $local_results"
 echo "Read this one file: $local_results/RESULT.txt"

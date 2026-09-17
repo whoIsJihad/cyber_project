@@ -109,3 +109,30 @@ def test_sender_uses_the_fixed_receiver_and_closes_the_socket() -> None:
     assert fake_socket.sent_packets[0][1] == (DESTINATION_IP_TEXT, 0)
     assert fake_socket.closed is True
     assert waits == [0.1, 0.1]
+
+
+class StopAfterThreeWaits:
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, seconds):
+        self.calls += 1
+        if self.calls == 3:
+            raise KeyboardInterrupt
+
+
+def test_continuous_sender_wraps_identities_and_closes_on_stop(monkeypatch):
+    monkeypatch.setattr("client.generator.MAX_PACKET_COUNT", 2)
+    fake_socket = FakeRawSocket()
+    sent = send_syn_packets(None, 10, FakeSocketFactory(fake_socket), StopAfterThreeWaits())
+    assert sent == 3
+    assert fake_socket.closed
+    assert fake_socket.sent_packets[0] == fake_socket.sent_packets[2]
+
+
+def test_sigterm_requests_graceful_stop():
+    from client.generator import stop_on_signal
+    import signal
+
+    with pytest.raises(KeyboardInterrupt):
+        stop_on_signal(signal.SIGTERM, None)

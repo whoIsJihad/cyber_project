@@ -21,11 +21,16 @@ At the top of `scripts/run_defense_comparison.sh`:
 
 | Want | Change these values |
 |---|---|
-| Quick check, about 2–4 minutes | `trials_per_condition=1`, `syn_duration_seconds=10`, `syn_rate=1000`, `http_duration_seconds=10` |
-| Full comparison, about 30–35 minutes | Leave the current values alone: `5`, `75`, `10000`, `30` |
-| Gentler/slower SYN traffic | Lower `syn_rate`, for example `1000` packets/second. |
-| More SYN pressure | Increase `syn_rate` or `syn_duration_seconds`; change only one at a time. |
-| More normal users | Increase `http_concurrency`; keep it the same for every condition. |
+| Shorter comparison | Set `trials_per_condition=1`. |
+| Current comparison | Two trials per condition, 20 seconds of HTTP, 20 HTTP workers, requested SYN rate 1,000/second. |
+| Change HTTP duration | Change `http_duration_seconds`; SYN sending continues until HTTP finishes. |
+| Change normal users | Change `http_concurrency`; keep it the same for every condition. |
+
+The generator starts in continuous mode before HTTP measurement. Once HTTP
+finishes, the script stops the generator and collects its log. Ctrl+C stops the
+whole run and restores the saved receiver settings. There is no queue-drain
+wait. Later trials can include leftover half-open connections; the result file
+states this limitation. `overlap.txt` records generator liveness before/after HTTP.
 
 `syn_rate` is fake SYN packets requested each second. `http_concurrency` is the number of normal HTTP requests allowed at once. Each normal HTTP request sends `Connection: close`, so it establishes its own TCP connection rather than reusing an earlier one.
 

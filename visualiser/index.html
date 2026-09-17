@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SYN Lab — Run Flow</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1b1f24; --sub:#5b6572;
+    --line:#e2e5ea; --accent:#2b6cff; --host:#7a5cff; --sender:#e0562f; --receiver:#1a9e6b;
+    --warn:#b8860b; --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#12151a; --card:#1a1e25; --ink:#e8eaed; --sub:#9aa4b2; --line:#2a2f38; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+       -webkit-font-smoothing:antialiased;padding-inline:16px}
+  .wrap{max-width:920px;margin:0 auto;padding-block:28px 60px}
+  h1{font-size:1.5rem;margin:0 0 4px}
+  .lede{color:var(--sub);margin:0 0 24px;font-size:.95rem;line-height:1.5}
+  h2{font-size:1.05rem;margin:36px 0 12px;display:flex;align-items:center;gap:8px}
+  h2 .num{width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff;font-size:.75rem;
+          display:inline-flex;align-items:center;justify-content:center;flex:none}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+  .stat .v{font-family:var(--mono);font-size:1.15rem;font-weight:600}
+  .stat .k{color:var(--sub);font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;margin-top:2px}
+
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin:14px 0 20px;font-size:.82rem;color:var(--sub)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+
+  .tabs{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  .tab{border:1px solid var(--line);background:var(--card);color:var(--sub);padding:6px 14px;border-radius:999px;
+       cursor:pointer;font-size:.85rem}
+  .tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+  .timeline{position:relative;padding-left:26px;border-left:2px solid var(--line);margin-left:6px}
+  .step{position:relative;margin-bottom:18px;background:var(--card);border:1px solid var(--line);
+        border-radius:10px;padding:12px 14px}
+  .step::before{content:"";position:absolute;left:-32px;top:16px;width:12px;height:12px;border-radius:50%;
+        background:var(--accent);border:2px solid var(--bg)}
+  .step.host::before{background:var(--host)} .step.sender::before{background:var(--sender)}
+  .step.receiver::before{background:var(--receiver)} .step.both::before{background:linear-gradient(90deg,var(--sender),var(--receiver))}
+  .step .t{font-family:var(--mono);font-size:.72rem;color:var(--sub);display:flex;justify-content:space-between}
+  .step .machine{font-weight:700;letter-spacing:.02em}
+  .step .body{margin-top:5px;font-size:.9rem;line-height:1.45}
+  .step .body code{background:rgba(127,127,127,.15);padding:1px 5px;border-radius:4px;font-size:.82em}
+  .note{border-left:3px solid var(--warn);background:rgba(184,134,11,.08);padding:10px 14px;border-radius:0 8px 8px 0;
+        font-size:.87rem;line-height:1.5;margin:14px 0}
+  .note b{color:var(--warn)}
+  .repeat{border:1px dashed var(--line);border-radius:10px;padding:10px 14px;margin:14px 0;font-size:.85rem;color:var(--sub)}
+
+  table{width:100%;border-collapse:collapse;font-size:.85rem;margin-top:8px}
+  th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line)}
+  th{color:var(--sub);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.03em}
+  td.mono,th.mono{font-family:var(--mono)}
+  .cond-baseline{color:var(--sub)} .cond-protected{color:var(--receiver)} .cond-unprotected{color:var(--sender)}
+
+  .foot{color:var(--sub);font-size:.8rem;margin-top:40px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>What happens when you run <code style="font-family:var(--mono)">run_defense_comparison.sh</code></h1>
+  <p class="lede">Three machines: your <b style="color:var(--host)">host</b> (this repo), the
+  <b style="color:var(--sender)">sender VM</b> (192.168.150.10, floods + makes HTTP requests) and the
+  <b style="color:var(--receiver)">receiver VM</b> (192.168.150.20, runs Nginx). Below is the exact sequence,
+  with real numbers from the current script.</p>
+
+  <h2><span class="num">1</span>Headline numbers</h2>
+  <div class="stats" id="stats"></div>
+
+  <h2><span class="num">2</span>One trial, step by step</h2>
+  <div class="tabs" id="tabs"></div>
+  <div class="legend">
+    <span><i class="dot" style="background:var(--host)"></i>host (your laptop)</span>
+    <span><i class="dot" style="background:var(--sender)"></i>sender VM (.10)</span>
+    <span><i class="dot" style="background:var(--receiver)"></i>receiver VM (.20)</span>
+    <span><i class="dot" style="background:linear-gradient(90deg,var(--sender),var(--receiver))"></i>both / network</span>
+  </div>
+  <div class="timeline" id="timeline"></div>
+
+  <div class="note"><b>No tcpdump here.</b> tcpdump only shows up in
+  <code>notes/watching-packets-with-tcpdump.md</code> as a separate manual exercise you run yourself in a third
+  terminal. The automated script never starts it — the only receiver-side observers are
+  <code>server.monitor</code> (polling, every 0.1s) and two <code>nstat -az</code> snapshots (before/after).</div>
+
+  <h2><span class="num">3</span>Full run: 6 trials, rotated order</h2>
+  <p class="lede" style="margin-bottom:8px">2 trials × 3 conditions = 6 trial runs. The condition order rotates each
+  trial so time-of-run bias (VM warm-up, jitter) can't favor one condition.</p>
+  <div id="trialtable"></div>
+
+  <div class="repeat">Before all of this: the script wipes and re-copies <code>client/</code> to the sender and
+  <code>server/</code> to the receiver over <code>scp</code>, so every run tests the code currently on your host,
+  not a stale VM copy.<br><br>
+  After all 6 trials: <code>scripts/summarize_comparison.py</code> reads <code>comparison.csv</code> and writes
+  <code>RESULT.txt</code>. Raw per-trial evidence moves into <code>details/</code>. On exit (normal or Ctrl+C),
+  the script restores the receiver's original <code>tcp_syncookies</code> / <code>tcp_max_syn_backlog</code> and
+  reloads nginx again so the box is left exactly as it was found.</div>
+
+  <div class="foot">Generated from <code>scripts/run_defense_comparison.sh</code> and <code>client/generator.py</code>.
+  Numbers here are hard-coded from those files at the time this page was built — if you change the script's
+  variables, this page won't auto-update.</div>
+</div>
+
+<script>
+const RATE = 1000, WORKERS = 8, PER_WORKER = Math.max(1, Math.floor(RATE/WORKERS));
+const TRIALS = 2, HTTP_DUR = 20, CONCURRENCY = 20, HTTP_TIMEOUT = 2, GATE_TIMEOUT = 20, BACKLOG = 16, MON_INTERVAL = 0.1;
+
+const stats = [
+  [`${RATE} pkt/s`, "requested SYN rate"],
+  [`${WORKERS} × ${PER_WORKER} pkt/s`, "worker split (multiprocess)"],
+  [`${BACKLOG}`, "tcp_max_syn_backlog set"],
+  [`${HTTP_DUR}s`, "HTTP measurement window"],
+  [`${CONCURRENCY} threads`, "concurrent HTTP workers"],
+  [`${HTTP_TIMEOUT}s`, "HTTP request timeout"],
+  [`≤${GATE_TIMEOUT}s`, "pressure-gate wait cap"],
+  [`${MON_INTERVAL}s`, "monitor sample interval"],
+  [`${TRIALS}×3 = 6`, "total trial runs"],
+];
+document.getElementById('stats').innerHTML = stats.map(([v,k]) =>
+  `<div class="stat"><div class="v">${v}</div><div class="k">${k}</div></div>`).join('');
+
+const conditions = {
+  baseline: {
+    label: "baseline", desc: "no flood at all — pure HTTP load for comparison",
+    steps: [
+      ["host",     "0s",  "Host has already scp'd client/ and server/ to both VMs (once, before any trial)."],
+      ["receiver", "0s",  "sysctl -w <code>tcp_syncookies=1 tcp_max_syn_backlog=16</code>, then <code>systemctl reload nginx</code> so the new backlog actually takes effect."],
+      ["receiver", "0s",  "<code>nstat -az</code> snapshot saved as <code>nstat-before.txt</code> (baseline TCP/IP counters)."],
+      ["receiver", "0s",  "<code>server.monitor --interval 0.1</code> starts in the background, sampling nginx status, port-80 SYN-RECV/ESTABLISHED counts, load avg, memory — every 0.1s."],
+      ["host",     "+1s", "Script sleeps 1s so the monitor has at least one sample before load starts."],
+      ["sender",   "+1s", "<code>sustained_http_load</code> runs in the foreground for 20s: 20 threads, each opening a fresh connection per request (<code>Connection: close</code>), as fast as possible, 2s timeout each."],
+      ["both",     "+21s","HTTP load finishes. Monitor and (n/a — no generator this condition) are stopped."],
+      ["receiver", "+21s","Second <code>nstat -az</code> snapshot → <code>nstat-after.txt</code>."],
+      ["host",     "+21s","http.csv, monitor.csv, both nstat files scp'd back; one row appended to comparison.csv."],
+    ]
+  },
+  protected: {
+    label: "protected", desc: "flood + syncookies ON — Linux answers extra SYNs statelessly instead of queueing them",
+    gate: "TcpExtSyncookiesSent",
+    steps: [
+      ["receiver", "0s",  "sysctl -w <code>tcp_syncookies=1 tcp_max_syn_backlog=16</code>, then reload nginx."],
+      ["receiver", "0s",  "<code>nstat -az</code> → nstat-before.txt. Monitor starts (0.1s interval)."],
+      ["host",     "+1s", "1s warm-up sleep."],
+      ["sender",   "+1s", `<code>client.generator --continuous --rate ${RATE} --workers ${WORKERS}</code> launched as root, detached (nohup). ${WORKERS} processes each send ~${PER_WORKER} pkt/s from spoofed sources in 192.168.150.128/25, ports 1024-65535, so total ≈ ${RATE} pkt/s.`],
+      ["host",     "+1s→≤21s", `Script polls receiver's <code>TcpExtSyncookiesSent</code> counter once a second, up to ${GATE_TIMEOUT}s, waiting for it to rise above its pre-flood value ("pressure gate"). Normally passes within a second or two.`],
+      ["sender",   "gate pass","HTTP load (20s, 20 threads, fresh connection per request) starts running while the flood keeps going in the background."],
+      ["both",     "+~gate+20s","HTTP finishes. Generator + monitor are killed (SIGTERM; script waits up to 5s for the generator to actually exit)."],
+      ["receiver", "end", "Second nstat snapshot. All evidence files pulled back to host."],
+    ]
+  },
+  unprotected: {
+    label: "unprotected", desc: "flood + syncookies OFF — once the queue is full, Linux just drops the extra SYNs",
+    gate: "TcpExtListenDrops",
+    steps: [
+      ["receiver", "0s",  "sysctl -w <code>tcp_syncookies=0 tcp_max_syn_backlog=16</code>, then reload nginx."],
+      ["receiver", "0s",  "<code>nstat -az</code> → nstat-before.txt. Monitor starts (0.1s interval)."],
+      ["host",     "+1s", "1s warm-up sleep."],
+      ["sender",   "+1s", `Same generator launch: ${WORKERS} workers × ~${PER_WORKER} pkt/s ≈ ${RATE} pkt/s total, spoofed sources, continuous.`],
+      ["host",     "+1s→≤21s", "Pressure gate this time watches <code>TcpExtListenDrops</code> — it rises once the (now genuinely small) backlog fills and the kernel starts dropping SYNs outright."],
+      ["sender",   "gate pass","HTTP load runs for 20s against the same real flood."],
+      ["both",     "+~gate+20s","HTTP finishes. Generator + monitor killed."],
+      ["receiver", "end", "Second nstat snapshot. Evidence pulled back."],
+    ]
+  }
+};
+
+const tabsEl = document.getElementById('tabs');
+const tlEl = document.getElementById('timeline');
+function renderCondition(key){
+  const c = conditions[key];
+  tabsEl.innerHTML = Object.keys(conditions).map(k =>
+    `<button class="tab ${k===key?'active':''}" data-k="${k}">${conditions[k].label}</button>`).join('');
+  tabsEl.querySelectorAll('.tab').forEach(b => b.onclick = () => renderCondition(b.dataset.k));
+
+  let extra = c.gate ? `<div class="note" style="margin:0 0 14px"><b>Pressure gate:</b> before HTTP starts, the script waits (up to ${GATE_TIMEOUT}s) for <code>${c.gate}</code> to rise, confirming the flood is actually landing before it's fair to measure HTTP against it.</div>` : "";
+
+  tlEl.innerHTML = `<p class="lede" style="margin-bottom:14px">${c.desc}</p>` + extra + c.steps.map(([m,t,body]) =>
+    `<div class="step ${m}"><div class="t"><span class="machine" style="color:var(--${m==='both'?'sender':m})">${m}</span><span>${t}</span></div><div class="body">${body}</div></div>`
+  ).join('');
+}
+renderCondition('baseline');
+
+const order = [];
+for(let trial=1; trial<=TRIALS; trial++){
+  for(let offset=0; offset<3; offset++){
+    const list=['baseline','protected','unprotected'];
+    const cond = list[(trial-1+offset)%3];
+    order.push({trial, cond});
+  }
+}
+document.getElementById('trialtable').innerHTML = `<table><thead><tr>
+  <th>Run #</th><th>Trial</th><th>Condition</th><th>Flood?</th><th>Backlog behavior under test</th>
+</tr></thead><tbody>${order.map((o,i)=>{
+  const flood = o.cond==='baseline' ? '—' : `${RATE} pkt/s (${WORKERS} workers)`;
+  const behavior = o.cond==='baseline' ? 'n/a' : o.cond==='protected' ? 'SYN cookies answer overflow' : 'kernel drops overflow SYNs';
+  return `<tr><td class="mono">${i+1}</td><td class="mono">${o.trial}</td><td class="cond-${o.cond}">${o.cond}</td><td class="mono">${flood}</td><td>${behavior}</td></tr>`;
+}).join('')}</tbody></table>`;
+</script>
+</body>
+</html>
