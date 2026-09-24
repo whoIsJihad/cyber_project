@@ -10,7 +10,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 
-DEFAULT_URL = "http://192.168.150.20/"
+DEFAULT_URL = "http://10.223.174.160/"
 CSV_FIELDS = ["timestamp_utc", "request_number", "concurrency", "success", "latency_ms", "http_status", "error"]
 
 

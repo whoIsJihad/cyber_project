@@ -121,7 +121,38 @@ def run_once(
         print(f"unblocked {source_ip}")
 
 
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Detect per-source SYN-flood pressure and apply temporary firewall blocks."
+    )
+    parser.add_argument("--interval", type=float, default=1.0)
+    parser.add_argument("--port", type=int, default=80)
+    parser.add_argument("--threshold", type=int, default=5)
+    parser.add_argument("--block-seconds", type=float, default=30.0)
+    parser.add_argument("--output", type=Path, default=Path("results/defense-events.csv"))
+    parser.add_argument("--dry-run", action="store_true")
+    arguments = parser.parse_args()
+    if arguments.interval <= 0:
+        raise ValueError("interval must be positive")
 
+    active_blocks: dict[str, float] = {}
+    mode = "dry-run (no iptables changes)" if arguments.dry_run else "active blocking"
+    print(
+        f"SYN Guard watching port {arguments.port}: threshold {arguments.threshold} "
+        f"half-open/source, {arguments.block_seconds}s blocks, {mode}; press Ctrl+C to stop"
+    )
+    try:
+        while True:
+            run_once(
+                arguments.port,
+                arguments.threshold,
+                arguments.block_seconds,
+                active_blocks,
+                arguments.output,
+                arguments.dry_run,
+            )
+            time.sleep(arguments.interval)
+    except KeyboardInterrupt:
         print(f"SYN Guard stopped; evidence saved to {arguments.output}")
 
 

