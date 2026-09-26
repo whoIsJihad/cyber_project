@@ -35,9 +35,27 @@ then tallies how many half-open connections each source IP currently holds.
 `>= --threshold` (default 5). This is the same idea as a rate/volume alarm:
 a real client might have one or two SYNs in flight; a flood source has many.
 
-### 3. Block new offenders
+On its own this single-snapshot check is too trigger-happy: under real load
+(which is exactly when this defense needs to run), a legitimate client's
+handshake can also sit half-open for a moment while the server is busy, so a
+one-off spike over the threshold isn't reliable evidence of an attack.
 
-For each offending IP not already tracked in `active_blocks`:
+`track_offenders()` adds a second, persistence check on top: it keeps a
+per-source streak of *consecutive* polls where that source stayed over the
+threshold, and only reports a source as confirmed once its streak reaches
+`--persistence` (default 3) checks in a row. A real handshake completes
+within roughly one poll interval, so a legitimate source drops back under the
+threshold and its streak resets to zero before it can ever reach
+`persistence`. A flood source's connections never complete, so it stays over
+threshold poll after poll and gets confirmed. This is the actual signature
+of a SYN flood — connections that persist in SYN-RECEIVED rather than ones
+that are merely numerous for an instant — and it's what the block decision
+is based on, not the raw count.
+
+### 3. Block confirmed offenders
+
+For each source IP that `track_offenders()` just confirmed, if it isn't
+already tracked in `active_blocks`:
 
 - Runs `iptables -I INPUT -p tcp -s <ip> --dport <port> --syn -j DROP`
   (skipped under `--dry-run`) — this drops future SYNs from that IP before
@@ -90,13 +108,23 @@ firewall rules.
 | `--block-seconds` | `30.0` | how long a block stays active before it's lifted |
 | `--output` | `results/defense-events.csv` | evidence CSV path |
 | `--dry-run` | off | detect and log, but don't touch `iptables` |
+| `--persistence` | `3` | consecutive over-threshold checks required before a source is blocked |
 
-## Key limitation to call out in the report
+## Key limitations to call out in the report
 
-Blocking is purely IP-based and reactive: it doesn't reset connections
+Blocking is still purely IP-based and reactive: it doesn't reset connections
 already sitting in SYN-RECEIVED for a blocked IP (the kernel's own
 SYN-RECEIVED timeout still applies to those), and it can't distinguish a
 spoofed-source flood (many distinct fake IPs, each under threshold) from a
 genuine single-source flood — a well-known real-world weakness of
 per-IP-threshold SYN-flood defenses, worth discussing alongside
 `tcp_syncookies` as a comparison point.
+
+The persistence check (`track_offenders()`) trades reaction speed for fewer
+false positives: it takes `--persistence` consecutive poll intervals
+(`--interval` seconds apart) before a genuine flood source gets blocked, so
+there's a short window at the start of an attack where it's detected but not
+yet acted on. This is a deliberate trade — the earlier single-snapshot
+version blocked faster but also blocked legitimate clients whose handshakes
+were merely delayed by server load, which is worse for an availability
+defense than a few extra seconds of exposure.

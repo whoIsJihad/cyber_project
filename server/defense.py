@@ -55,6 +55,31 @@ def sources_over_threshold(counts: dict[str, int], threshold: int) -> list[str]:
     return [source_ip for source_ip, count in counts.items() if count >= threshold]
 
 
+def track_offenders(
+    counts: dict[str, int], threshold: int, strikes: dict[str, int], persistence: int
+) -> list[str]:
+    """Update each source's consecutive over-threshold streak; return sources that just
+    reached `persistence` in a row.
+
+    A real handshake finishes within one poll interval, so a source that briefly spikes
+    over the threshold (a burst of legitimate traffic, a slow but real client) drops back
+    below it on the very next check and its streak resets to zero. A flood source never
+    completes its handshakes, so it stays over threshold poll after poll. Requiring several
+    consecutive over-threshold checks before blocking is what tells the two apart, instead
+    of judging a source off a single snapshot.
+    """
+    over_threshold = set(sources_over_threshold(counts, threshold))
+    newly_confirmed = []
+    for source_ip in over_threshold:
+        strikes[source_ip] = strikes.get(source_ip, 0) + 1
+        if strikes[source_ip] == persistence:
+            newly_confirmed.append(source_ip)
+    for source_ip in list(strikes):
+        if source_ip not in over_threshold:
+            del strikes[source_ip]
+    return newly_confirmed
+
+
 def block_rule(source_ip: str, port: int) -> list[str]:
     """Return the iptables command that drops new SYNs from one source."""
     return ["iptables", "-I", "INPUT", "-p", "tcp", "-s", source_ip, "--dport", str(port), "--syn", "-j", "DROP"]
@@ -96,22 +121,27 @@ def run_once(
     active_blocks: dict[str, float],
     csv_path: Path,
     dry_run: bool,
+    strikes: dict[str, int],
+    persistence: int = 3,
     command_runner=run_command,
     time_source=time.monotonic,
 ) -> None:
-    """Poll SYN-RECEIVED state once, block new offenders, lift expired blocks."""
+    """Poll SYN-RECEIVED state once, block persistent offenders, lift expired blocks."""
     now = time_source()
     output = command_runner(["ss", "-Hnt", "state", "syn-recv", "(", "sport", "=", f":{port}", ")"])
     counts = count_by_source(parse_syn_recv_sources(output))
 
-    for source_ip in sources_over_threshold(counts, threshold):
+    for source_ip in track_offenders(counts, threshold, strikes, persistence):
         if source_ip in active_blocks:
             continue
         if not dry_run:
             command_runner(block_rule(source_ip, port))
         active_blocks[source_ip] = now + block_seconds
         log_event(csv_path, "block", source_ip, counts[source_ip], block_seconds)
-        print(f"blocked {source_ip}: {counts[source_ip]} half-open connections on port {port}")
+        print(
+            f"blocked {source_ip}: {counts[source_ip]} half-open connections on port {port} "
+            f"for {persistence} consecutive checks"
+        )
 
     for source_ip in expired_blocks(active_blocks, now):
         if not dry_run:
@@ -131,15 +161,25 @@ def main() -> None:
     parser.add_argument("--block-seconds", type=float, default=30.0)
     parser.add_argument("--output", type=Path, default=Path("results/defense-events.csv"))
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--persistence",
+        type=int,
+        default=3,
+        help="consecutive over-threshold checks required before a source is blocked",
+    )
     arguments = parser.parse_args()
     if arguments.interval <= 0:
         raise ValueError("interval must be positive")
+    if arguments.persistence < 1:
+        raise ValueError("persistence must be at least 1")
 
     active_blocks: dict[str, float] = {}
+    strikes: dict[str, int] = {}
     mode = "dry-run (no iptables changes)" if arguments.dry_run else "active blocking"
     print(
         f"SYN Guard watching port {arguments.port}: threshold {arguments.threshold} "
-        f"half-open/source, {arguments.block_seconds}s blocks, {mode}; press Ctrl+C to stop"
+        f"half-open/source for {arguments.persistence} consecutive checks, "
+        f"{arguments.block_seconds}s blocks, {mode}; press Ctrl+C to stop"
     )
     try:
         while True:
@@ -150,6 +190,8 @@ def main() -> None:
                 active_blocks,
                 arguments.output,
                 arguments.dry_run,
+                strikes,
+                arguments.persistence,
             )
             time.sleep(arguments.interval)
     except KeyboardInterrupt:
