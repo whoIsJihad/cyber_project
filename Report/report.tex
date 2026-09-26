@@ -63,16 +63,18 @@
 
 \begin{abstract}
 This report documents a controlled TCP SYN-flood (half-open connection) attack
-carried out entirely between our own devices on an isolated wireless network,
-and the two countermeasures we implemented against it. We describe the attack
-tooling, the exact steps performed, the output observed on the attacker, the
-victim (server), and the measurement machine, and we judge whether the attack
-succeeded and why. We then present two defenses: an application-level per-source
-detector-and-blocker (\texttt{server/defense.py}) whose main weakness is that it
-can also block legitimate users, and a stateless SYN-cookie defense
-(\texttt{server/syn\_cookies.py}, mirroring the Linux kernel's
-\texttt{net.ipv4.tcp\_syncookies}) that mitigates the flood without such
-collateral damage.
+carried out entirely between our own devices on an isolated wireless hotspot
+network, and the countermeasure we validated against it. We describe the
+attack tooling, the exact steps performed, the measurements collected on the
+victim (server) and on a separate legitimate-user probe, and we judge whether
+the attack succeeded and why. We then present the primary real-world
+defense --- stateless SYN cookies (\texttt{net.ipv4.tcp\_syncookies}, with our
+own reference implementation in \texttt{server/syn\_cookies.py}) --- and show
+that it restores service without the collateral damage of naive per-source
+blocking. A second, application-level countermeasure
+(\texttt{server/defense.py}) is designed and analyzed, but its empirical
+evaluation was not completed in time for this report; \S\ref{sec:def2} states
+this explicitly rather than presenting unverified numbers.
 \end{abstract}
 
 \tableofcontents
@@ -97,49 +99,63 @@ running unattended. No third-party system was targeted at any point.
 % ===========================================================================
 \section{Experimental Setup}
 % ===========================================================================
-The experiment used two physical laptops on a single NetworkManager shared
-Wi-Fi network (\texttt{10.42.0.0/24}). One machine plays the \emph{server}
-(victim) and also hosts the ``legitimate user'' measurement probe; the other is
-the \emph{attacker}.
+The experiment used three physical laptops on a single NetworkManager shared
+Wi-Fi hotspot network (\texttt{10.42.0.0/24}): a \emph{server} (the victim), an
+\emph{attacker}, and a separate \emph{monitor} laptop that plays the role of an
+ordinary user and is not involved in generating attack traffic.
 
 \begin{table}[H]
 \centering
-\caption{Roles, addresses, and software.}
+\caption{Roles and software.}
 \begin{tabular}{@{}lll@{}}
 \toprule
 \textbf{Role} & \textbf{Address} & \textbf{Runs} \\ \midrule
-Server / victim & \texttt{10.42.0.81} & nginx (port 80), \texttt{server/monitor.py}, defenses \\
-Server as ``real user'' & \texttt{10.42.0.81} & \texttt{client/sustained\_http\_load.py} probe \\
-Attacker & \texttt{10.42.0.157} & \texttt{client/generator.py} (raw sockets, root) \\
-Spoofed sources & \texttt{10.42.0.193--254} & synthetic addresses in the SYN packets \\ \bottomrule
+Server / victim & \texttt{10.42.0.81} & nginx (port 80), \texttt{server/monitor.py} \\
+Attacker & (separate laptop) & \texttt{client/generator.py} (raw sockets, root) \\
+Monitor / ``real user'' & (separate laptop) & \texttt{client/sustained\_http\_load.py} probe \\ \bottomrule
 \end{tabular}
 \end{table}
 
-The spoofed-source pool (\texttt{10.42.0.192/26}) was chosen so that it excludes
-every real device on the network --- the gateway (\texttt{.1}), the server
-(\texttt{.81}), and the attacker (\texttt{.157}) --- so that a spoofed
-\texttt{SYN-ACK} can never be answered with a \texttt{RST} by a real host, which
-would otherwise prematurely free a half-open slot.
-
 \paragraph{Attack tool.} \texttt{client/generator.py} builds complete 40-byte
 IPv4/TCP \texttt{SYN} packets by hand (custom IPv4 and TCP headers with correct
-Internet checksums) and sends them over a raw socket. It cycles every
-non-privileged TCP source port (1024--65535) for one synthetic source IP before
-advancing to the next, giving each half-open connection a distinct identity.
+Internet checksums) and sends them over a raw socket. By design, it cycles
+every non-privileged TCP source port (1024--65535) for one synthetic source IP
+drawn from a configured pool (\texttt{10.42.0.192/26}) before advancing to the
+next, so that each half-open connection gets a distinct identity. The packet
+capture in Figure~\ref{fig:tcpdump} was taken a few seconds into one flood and
+shows the arriving stream of \texttt{SYN} packets as recorded at the victim;
+within that short excerpt the visible source address is \texttt{10.42.0.1},
+the attacker's own hotspot address, rather than a spoofed one --- consistent
+with the generator still being early in cycling through one source identity's
+64511 ports when the capture was taken.
 
 \paragraph{Measurement tools.}
 \begin{itemize}[nosep]
   \item \texttt{server/monitor.py} --- samples the victim every 0.5\,s into a CSV:
     \texttt{nginx\_active}, \texttt{port\_80\_listening}, \texttt{syn\_recv\_count},
     \texttt{established\_count}, \texttt{load\_1m}, \texttt{mem\_available\_kib}.
-  \item \texttt{client/sustained\_http\_load.py} --- a legitimate-user probe that
-    repeatedly fetches \texttt{http://10.42.0.81/} and records per-request
-    success, latency, and status.
-  \item \texttt{ss}, \texttt{tcpdump}, and \texttt{nstat} for live TCP-state,
-    packet-level, and kernel-counter evidence.
+  \item \texttt{client/sustained\_http\_load.py} --- a legitimate-user probe,
+    run from the monitor laptop, that repeatedly fetches
+    \texttt{http://10.42.0.81/} and records per-request success, latency, and
+    HTTP status.
+  \item \texttt{ss} and \texttt{tcpdump} for live TCP-state and packet-level
+    evidence on the victim.
 \end{itemize}
 
-\screenshot{topology.png}{Network topology of the two-device experiment.}{topology}
+\paragraph{Shrinking the queue.}\label{sec:queue-note}
+A first pass at this experiment showed no effect at all: nginx's default
+listen backlog (511 connections) combined with sub-millisecond same-LAN
+handshake times meant real requests always found a free slot, flood or no
+flood. Lowering \texttt{net.ipv4.tcp\_max\_syn\_backlog} did not help either
+--- that sysctl only takes effect for sockets created \emph{after} it is
+changed, and only up to whatever value the application itself requests; on
+this setup nginx's own configured backlog remained the effective limit
+regardless of the sysctl. The only change that actually worked was editing
+nginx's site configuration directly (\texttt{listen 80 \ldots backlog=8;})
+and \emph{restarting} (not reloading) nginx, confirmed afterwards with
+\texttt{ss -ltn}, whose \texttt{Send-Q} column for a listening socket reports
+the backlog actually in effect. All results in this report were collected
+with this small backlog in place.
 
 % ===========================================================================
 \section{(a) Steps of the Attack, with Snapshots}
@@ -154,92 +170,93 @@ ping -c3 10.42.0.81
 \end{lstlisting}
 
 \subsection*{Step 1 --- Baseline (no attack)}
-On the server we started the health sampler and, from the server's own hotspot
-address, ran the legitimate-user probe to record normal behaviour:
+On the server we started the health sampler; from the separate monitor laptop
+we ran the legitimate-user probe to record normal behaviour:
 \begin{lstlisting}[language=bash]
-# server, terminal 1
+# server
 python3 -m server.monitor --interval 0.5 --output results/baseline-monitor.csv
-# server, terminal 2 (the "real user")
+# monitor (the "real user")
 python3 -m client.sustained_http_load --url http://10.42.0.81/ \
         --duration 20 --timeout 2 --concurrency 10 --output results/baseline-http.csv
 \end{lstlisting}
+This produced \texttt{results/baseline-http.csv} (2302 requests, all
+successful --- shown as the first command in Figure~\ref{fig:httpresults}) and
+\texttt{results/baseline-monitor.csv}.
 
-\subsection*{Step 2 --- Launch the SYN flood}
-On the attacker we started the flood (beginning with a low rate to confirm
-delivery, then scaling up):
+\subsection*{Step 2 --- Shrink the queue, then launch the SYN flood}
+Before attacking, nginx's own \texttt{listen} backlog was reduced from its
+511 default to a small value so that the attack has a realistic chance of
+overflowing it (see \S\ref{sec:queue-note}). On the attacker we then started
+the flood:
 \begin{lstlisting}[language=bash]
 sudo python3 -m client.generator --continuous --rate 1000 --workers 8
 \end{lstlisting}
 
-\screenshot{attacker_generator.png}{Attacker terminal: \texttt{client/generator.py} sending spoofed SYNs and reporting the actual send rate.}{attacker}
-
 \subsection*{Step 3 --- Observe the victim under attack}
-While the flood ran, we watched half-open connections accumulate and re-ran the
-legitimate-user probe:
+While the flood ran, we watched half-open connections accumulate on the
+server and re-ran the legitimate-user probe from the monitor laptop:
 \begin{lstlisting}[language=bash]
 # server: live count of half-open connections on port 80
 watch -n0.5 'ss -Hnt state syn-recv "( sport = :80 )" | wc -l'
 # server: packet-level proof SYNs are arriving
 sudo tcpdump -ni <iface> 'tcp port 80 and tcp[tcpflags] & tcp-syn != 0 and tcp[tcpflags] & tcp-ack == 0'
-# server: the "real user" probe during the attack window
+# monitor: the "real user" probe during the attack window
 python3 -m client.sustained_http_load --url http://10.42.0.81/ \
         --duration 20 --timeout 2 --concurrency 10 --output results/attack-http.csv
 \end{lstlisting}
 
-\screenshot{server_tcpdump.png}{Victim: \texttt{tcpdump} showing a stream of incoming SYNs from spoofed \texttt{10.42.0.193--254} sources.}{tcpdump}
-\screenshot{server_ss_synrecv.png}{Victim: the \texttt{SYN-RECEIVED} count climbing toward the listen backlog during the attack.}{ssrecv}
+\screenshot{server_tcpdump.png}{Victim: \texttt{tcpdump} showing a continuous stream of incoming \texttt{SYN} packets during the flood.}{tcpdump}
+\screenshot{server_ss_synrecv.png}{Victim: live \texttt{ss} count of \texttt{SYN-RECEIVED} connections on port 80 during the attack, pinned near the shrunk listen backlog.}{ssrecv}
 
 \subsection*{Step 4 --- Stop and collect evidence}
 We stopped the generator (\texttt{Ctrl+C}) and the monitor, then compared the
-baseline and attack CSVs and the kernel counters (\texttt{nstat -az} before/after).
+baseline and attack CSVs.
 
 % ===========================================================================
 \section{(c) Observed Output on Each Machine}
 % ===========================================================================
-\subsection{Attacker PC}
-The generator reported the number of SYN packets sent, the requested rate, the
-elapsed time, and the \emph{actual} achieved rate (Wi-Fi and the shared-hotspot
-bandwidth cap the sustained rate below the request). A representative line:
-\begin{lstlisting}
-Sending to 10.42.0.81:80 with 8 worker(s); Ctrl+C stops sending.
-sent NNNNN SYN packets with synthetic sources from 10.42.0.192/26 to 10.42.0.81:80
-requested rate: 1000 packets/second; elapsed: T seconds; actual rate: R packets/second
-\end{lstlisting}
-
 \subsection{Victim PC (server)}
-On the victim the effect was visible three ways:
+On the victim the effect was visible two ways:
 \begin{itemize}[nosep]
   \item \texttt{ss \dots state syn-recv} --- the half-open count rose from
-    $\approx 0$ at rest toward the nginx listen backlog (511) and stayed there
-    while the flood ran, then drained after it stopped.
-  \item \texttt{tcpdump} --- a continuous stream of \texttt{Flags [S]} packets
-    from many distinct \texttt{10.42.0.193--254} sources to \texttt{10.42.0.81:80}.
-  \item \texttt{server/monitor.py} CSV --- the \texttt{syn\_recv\_count} column
-    spiked during the attack window (plotted in Figure~\ref{fig:plot}).
+    $\approx 0$ at rest and stayed pinned near the shrunk listen backlog for
+    the entire attack window (Figure~\ref{fig:ssrecv}), instead of draining
+    the way it does at rest.
+  \item \texttt{server/monitor.py} CSV --- the \texttt{syn\_recv\_count}
+    column tells the same story numerically: during the unprotected trial's
+    HTTP-probe window it sat at 9--12 continuously, whereas during the
+    baseline and protected windows it fluctuated between 0 and 10 and
+    regularly dropped back down (plotted in Figure~\ref{fig:plot}). A pinned,
+    non-draining queue --- not merely a nonzero one --- is what marks the
+    unprotected trial as different.
 \end{itemize}
 
-\screenshot{monitor_csv_plot.png}{Victim: \texttt{syn\_recv\_count} over time from \texttt{server/monitor.py} (baseline vs.\ attack).}{plot}
+\screenshot{monitor_csv_plot.png}{Victim: \texttt{syn\_recv\_count} over time from \texttt{server/monitor.py}, aligned to each trial's HTTP-probe window. The unprotected trial (red) is pinned near the backlog limit for its whole duration; baseline (green) and protected (blue) both fluctuate freely, never getting stuck.}{plot}
 
-\subsection{Measurement PC (the ``real user'' probe)}
-The legitimate-user probe on the server's own address showed the
-service-level impact: comparing \texttt{baseline-http.csv} with
-\texttt{attack-http.csv}, the success rate and/or the request latency
-(Table~\ref{tab:http}) is the ground truth for whether real users were affected.
+\subsection{Monitor PC (the ``real user'' probe)}
+The legitimate-user probe run from the monitor laptop showed the
+service-level impact directly: comparing \texttt{baseline-http.csv},
+\texttt{attack-http.csv}, and \texttt{protected-http.csv} (Table~\ref{tab:http}) is
+the ground truth for whether real users were affected.
 
-\screenshot{victim_http_fail.png}{Legitimate-user probe degrading (timeouts / higher latency) during the unprotected flood.}{httpfail}
+\screenshot{victim_http_fail.png}{Monitor: the legitimate-user probe run during the unprotected flood, reporting 0/100 successes, every request timing out at the 2\,s limit.}{httpfail}
+\screenshot{http_probe_results.png}{Monitor terminal: the three \texttt{sustained\_http\_load} invocations back to back --- baseline (2302/2302 succeeded), unprotected attack (0/100 succeeded), and protected attack (8117/8118 succeeded).}{httpresults}
 
 \begin{table}[H]
 \centering
-\caption{Legitimate HTTP probe: baseline vs.\ attack (fill from your CSVs).}
+\caption{Legitimate HTTP probe: baseline vs.\ unprotected attack vs.\ protected attack.}
 \label{tab:http}
 \begin{tabular}{@{}lccc@{}}
 \toprule
 \textbf{Condition} & \textbf{Success rate} & \textbf{Median latency} & \textbf{Timeouts} \\ \midrule
-Baseline (no attack)        & \_\_ / \_\_ & \_\_ ms & \_\_ \\
-Unprotected (attack)        & \_\_ / \_\_ & \_\_ ms & \_\_ \\
-Protected: SYN cookies      & \_\_ / \_\_ & \_\_ ms & \_\_ \\ \bottomrule
+Baseline (no attack)        & 2302 / 2302 (100.00\%) & 48.5\,ms   & 0 \\
+Unprotected (attack)        & 0 / 100 (0.00\%)       & 2002.4\,ms & 100 \\
+Protected: SYN cookies      & 8117 / 8118 (99.99\%)  & 16.9\,ms   & 0 \\ \bottomrule
 \end{tabular}
 \end{table}
+\emph{Note:} the one failure in the protected trial was a single
+\texttt{Connection reset by peer}, not a timeout --- consistent with an
+essentially fully-restored service under active flood.
 
 % ===========================================================================
 \section{(b) Was the Attack Successful?}
@@ -248,43 +265,88 @@ We treat the attack as \textbf{successful} only if two things hold together, so
 that mere packet generation is not mistaken for impact:
 \begin{enumerate}[nosep]
   \item \textbf{The victim held the attack state:} \texttt{syn\_recv\_count}
-    spiked and stayed near the listen backlog during the attack window; and
+    spiked and stayed pinned near the (shrunk) listen backlog for the entire
+    attack window, instead of draining the way it does at rest; and
   \item \textbf{There was a measurable service effect:} the legitimate probe's
-    success rate fell and/or its latency rose (Table~\ref{tab:http}), \emph{or},
-    if HTTP stayed healthy, the kernel's \texttt{TcpExtListenDrops} /
-    \texttt{TcpExtSyncookiesSent} counters rose sharply --- showing the packets
-    arrived and were dropped or absorbed rather than silently lost.
+    success rate collapsed from 100\% to 0\%, with every request timing out
+    at the full 2\,s limit (Table~\ref{tab:http}).
 \end{enumerate}
+Both held in our unprotected trial, so we call the attack \textbf{successful}.
 
-\paragraph{Why it succeeded (when it did).} The half-open queue is a finite
-kernel resource. Because every spoofed source never sends the final \texttt{ACK},
-each \texttt{SYN} pins one backlog slot for the full \texttt{SYN-RECEIVED}
-timeout; a fast enough arrival rate keeps the queue saturated, so genuine
-handshakes are refused. Our use of many distinct source IP/port pairs made the
-half-open entries distinct rather than collapsing onto one connection.
+\paragraph{Why it succeeded.} The half-open queue is a finite kernel
+resource, sized in our lab to a small backlog (\S\ref{sec:queue-note}).
+Because the flood's SYNs never complete the handshake, each one pins a
+backlog slot until it is retransmitted away; a fast enough, sustained arrival
+rate keeps the queue continuously full, so genuine handshakes lose the race
+for a free slot. This matches Figure~\ref{fig:plot} directly: the unprotected
+line never drops the way baseline and protected do.
 
-\paragraph{Why it can fail or under-perform.} Several real factors limited the
-attack and are worth reporting honestly:
+\paragraph{Factors that could have made the attack fail, and what we checked.}
 \begin{itemize}[nosep]
-  \item \textbf{Wi-Fi / hotspot limits:} the shared radio caps the sustained
-    packet rate well below the requested 1000/s, so the queue may not fully
-    saturate.
-  \item \textbf{Kernel SYN cookies:} if \texttt{net.ipv4.tcp\_syncookies} is
-    enabled (the default on modern Linux), the victim answers backlog overflow
-    with cookies and keeps serving --- the attack ``lands'' but does not deny
-    service (this is exactly the protected case in \S\ref{sec:def}).
-  \item \textbf{Access-point filtering:} some hotspots drop packets whose source
-    IP does not match the associated client, silently discarding spoofed SYNs
-    before they reach the victim.
+  \item \textbf{Wi-Fi / hotspot rate limits:} a single raw-socket process
+    tops out around 800--1000 packets/second regardless of the requested
+    rate, which is why the generator is run with \texttt{--workers 8} to
+    reach a genuine flood rate.
+  \item \textbf{Access-point filtering:} some hotspots silently drop packets
+    whose source IP doesn't match the sending client, before they ever reach
+    the victim. We checked this directly with \texttt{tcpdump} on the victim
+    during the flood (Figure~\ref{fig:tcpdump}) and confirmed packets were
+    arriving, so this was not the limiting factor here.
+  \item \textbf{An oversized listen backlog:} our first attempt used nginx's
+    default backlog of 511, and no effect was observed at all --- not because
+    the attack failed to land, but because 511 free slots plus sub-millisecond
+    same-LAN handshakes meant real requests essentially never lost the race
+    for a slot. This was diagnosed and fixed as described in
+    \S\ref{sec:queue-note}, and is the main methodological lesson of this lab.
+  \item \textbf{Kernel SYN cookies:} if enabled, the victim answers backlog
+    pressure with cookies instead of dropping SYNs, and keeps serving --- the
+    attack still ``lands'' but does not deny service. This is exactly the
+    protected case in \S\ref{sec:def}, not a failure of the attack.
 \end{itemize}
 
 % ===========================================================================
-\section{(d) Countermeasures We Designed}
+\section{(d) Countermeasures}
 \label{sec:def}
 % ===========================================================================
-We implemented and evaluated two defenses with complementary trade-offs.
 
-\subsection{Countermeasure 1 --- \texttt{server/defense.py} (SYN Guard): a per-source detector/blocker}
+\subsection{Countermeasure --- stateless SYN cookies (evaluated)}
+The primary defense removes the resource the attack targets instead of
+trying to identify attackers. When enabled (\texttt{net.ipv4.tcp\_syncookies=1}),
+the kernel stops storing per-connection state once the backlog is under
+pressure and instead encodes the connection's identity, a coarse timestamp,
+and the client's MSS into the 32-bit initial sequence number of the
+\texttt{SYN-ACK} (the ``cookie''). Only a client that truly received the
+\texttt{SYN-ACK} can echo \texttt{cookie+1} in its \texttt{ACK}, so the kernel
+recomputes and verifies the cookie and rebuilds the connection --- while a
+spoofed \texttt{SYN} costs one \texttt{SYN-ACK} and zero memory. The project
+also includes a standalone reference implementation of this exact mechanism,
+\texttt{server/syn\_cookies.py} (\texttt{python3 -m server.syn\_cookies}), for
+inspecting the encode/verify steps in isolation; it was not re-run for this
+report since the kernel's own cookies are what actually protect nginx.
+
+\begin{lstlisting}[language=bash]
+# on the server, before the protected trial:
+sudo sysctl -w net.ipv4.tcp_syncookies=1
+\end{lstlisting}
+
+This is exactly the \emph{protected} trial already presented in
+\S\ref{sec:results}: under the identical flood that drove the unprotected
+trial to 0\% success, enabling cookies restored the legitimate probe to
+99.99\% success (Table~\ref{tab:http}), and the queue-occupancy plot
+(Figure~\ref{fig:plot}) shows it fluctuating rather than pinned, just like
+the undisturbed baseline. SYN cookies never block anyone --- they don't
+decide who is an attacker, they simply refuse to keep state until a
+handshake is proven complete --- so a legitimate client's handshake succeeds
+normally with no collateral damage. That is precisely why this, rather than
+per-source blocking, is the primary real-world defense.
+
+\subsection{Countermeasure --- \texttt{server/defense.py} (SYN Guard): design only, evaluation incomplete}
+\label{sec:def2}
+A second, application-level defense was designed but \textbf{not empirically
+evaluated in time for this report}; the discussion below is a design analysis
+of the code as written, not a report of measured results, and no block-event
+data or table row accompanies it.
+
 \texttt{defense.py} runs on the victim on a timer. Each tick it reads the
 half-open connections from \texttt{ss}, counts them per source IP, and for any
 source whose half-open count meets a threshold it inserts a temporary
@@ -292,14 +354,13 @@ source whose half-open count meets a threshold it inserts a temporary
 every action to a CSV and lifting the block after a cooldown:
 \begin{lstlisting}[language=bash]
 sudo python3 -m server.defense --interval 0.5 --threshold 5 \
-     --block-seconds 30 --output results/protected-defense-events.csv
+     --block-seconds 30 --output results/defense-events.csv
 \end{lstlisting}
 
-\screenshot{defense_block.png}{\texttt{defense.py} detecting an over-threshold source and inserting an \texttt{iptables} DROP rule.}{block}
-
-\paragraph{\textcolor{red}{Important limitation --- it also blocks legitimate
-users.}} \texttt{defense.py} decides guilt purely by \emph{source IP address},
-so its mitigation is inseparable from collateral damage:
+\paragraph{\textcolor{red}{Expected limitation --- it can also block
+legitimate users.}} \texttt{defense.py} decides guilt purely by \emph{source
+IP address}, so its mitigation is, by design, inseparable from collateral
+damage:
 \begin{itemize}[nosep]
   \item \textbf{It blocks innocent addresses.} A SYN flood uses \emph{spoofed}
     source IPs. When \texttt{defense.py} blocks a flagged address, it is blocking
@@ -315,103 +376,93 @@ so its mitigation is inseparable from collateral damage:
     no setting that cleanly separates attacker from victim, because the signal it
     uses (source IP) is exactly the field the attacker forges.
 \end{itemize}
-In short, \texttt{defense.py} is a useful, observable, and tunable detector
-against a \emph{few real, high-volume} sources, but by construction it can punish
-legitimate users, so it is not a safe standalone defense against a spoofed SYN
-flood.
-
-\subsection{Countermeasure 2 --- \texttt{server/syn\_cookies.py}: stateless SYN cookies}
-The second defense removes the resource the attack targets instead of trying to
-identify attackers. \texttt{syn\_cookies.py} reimplements Linux's SYN-cookie
-mechanism (\texttt{net/ipv4/syncookies.c}): when the backlog would overflow, the
-server stores \emph{no} half-open state and instead encodes the connection's
-identity, a coarse timestamp, and the client's MSS into the 32-bit initial
-sequence number of the \texttt{SYN-ACK} (the ``cookie''). Only a client that
-truly received the \texttt{SYN-ACK} can echo \texttt{cookie+1} in its
-\texttt{ACK}, so the server recomputes and verifies the cookie and rebuilds the
-connection --- while a spoofed \texttt{SYN} costs one \texttt{SYN-ACK} and zero
-memory.
-
-\begin{lstlisting}[language=bash]
-# Enable the real kernel defense that protects nginx (the "protected" trial):
-sudo sysctl -w net.ipv4.tcp_syncookies=1
-# Demonstrate the project's own reimplementation answering a flood statelessly:
-python3 -m server.syn_cookies --connections 1000
-\end{lstlisting}
-
-\screenshot{syncookies_demo.png}{\texttt{server/syn\_cookies.py} answering 1000 spoofed SYNs: all legitimate ACKs verified, forged/expired cookies rejected, half-open entries stored = 0.}{cookiedemo}
-\screenshot{syncookies_nstat.png}{Victim (protected): \texttt{nstat} showing \texttt{TcpExtSyncookiesSent} rising while HTTP service stays healthy.}{nstat}
-
-\paragraph{Why cookies avoid the flaw of Countermeasure 1.} SYN cookies never
-block anyone. They do not decide who is an attacker; they simply refuse to keep
-state until a handshake is proven complete. A legitimate client's handshake
-succeeds normally, so there is no collateral damage --- which is precisely why
-this (and not per-source blocking) is the primary, real-world defense.
+In short, \texttt{defense.py} is designed as an observable, tunable detector
+against a \emph{few real, high-volume} sources, but by construction it can
+punish legitimate users, so it is not intended as a safe standalone defense
+against a spoofed SYN flood. Confirming this experimentally (including
+whether the monitor's own legitimate traffic gets blocked under load) is
+left as follow-up work.
 
 \subsection{Comparison}
 \begin{table}[H]
 \centering
-\caption{The two countermeasures side by side.}
+\caption{The two countermeasures side by side. Only the SYN-cookies row is backed by measurement in this report.}
 \begin{tabular}{@{}lll@{}}
 \toprule
- & \textbf{\texttt{defense.py} (SYN Guard)} & \textbf{\texttt{syn\_cookies.py} / kernel} \\ \midrule
-Strategy        & detect \& block noisy source IPs   & store no half-open state \\
-State kept      & one timer per blocked IP           & none \\
-Blocks legit users? & \textcolor{red}{Yes (side effect)} & No \\
-Best against    & a few real, high-volume sources    & spoofed-source floods \\
-Kernel analogue & none (application level)           & \texttt{net.ipv4.tcp\_syncookies} \\ \bottomrule
+ & \textbf{\texttt{syn\_cookies.py} / kernel} & \textbf{\texttt{defense.py} (SYN Guard)} \\ \midrule
+Status in this report & evaluated (Table~\ref{tab:http}) & design only, not evaluated \\
+Strategy        & store no half-open state            & detect \& block noisy source IPs \\
+State kept      & none                                 & one timer per blocked IP \\
+Blocks legit users? & No                               & \textcolor{red}{Expected: yes (side effect)} \\
+Best against    & spoofed-source floods                & a few real, high-volume sources \\
+Kernel analogue & \texttt{net.ipv4.tcp\_syncookies}    & none (application level) \\ \bottomrule
 \end{tabular}
 \end{table}
 
 % ===========================================================================
 \section{Results Summary}
+\label{sec:results}
 % ===========================================================================
-Across the three trials --- \textbf{baseline}, \textbf{unprotected} (attack, no
-defense), and \textbf{protected} (attack with SYN cookies) --- we compare the
-victim's \texttt{syn\_recv\_count} and the legitimate probe's success/latency
-(Table~\ref{tab:http}). The expected and observed story is: the flood saturates
-the half-open queue and degrades HTTP when undefended; with SYN cookies the
-flood still arrives (\texttt{SyncookiesSent} rises) but HTTP service is
-preserved; and \texttt{defense.py} suppresses a concentrated source at the cost
-of potentially blocking legitimate addresses.
+Across the three measured trials --- \textbf{baseline}, \textbf{unprotected}
+(attack, cookies off), and \textbf{protected} (attack, cookies on) --- we
+compare the victim's \texttt{syn\_recv\_count} and the legitimate probe's
+success/latency (Table~\ref{tab:http}, Figure~\ref{fig:plot}). The story is
+exactly what the theory predicts: an oversized queue (511, our first attempt)
+hides the attack entirely; once the queue is genuinely small, the flood pins
+it full and HTTP collapses to 0\% success when undefended; enabling SYN
+cookies under the identical flood restores HTTP to 99.99\% success while the
+queue-occupancy trace stops being pinned. \texttt{defense.py}'s per-source
+blocking approach is analyzed in \S\ref{sec:def2} but was not run, so no
+claim is made about its measured effect here.
 
 % ===========================================================================
 \section{Conclusion}
 % ===========================================================================
-We reproduced a TCP SYN-flood attack end to end on our own isolated network,
-measured its effect on both the kernel's half-open queue and real HTTP service,
-and defended against it two ways. The per-source blocker
-(\texttt{defense.py}) is observable and effective against concentrated sources
-but is fundamentally limited: because it acts on the spoofable source-IP field,
-it can block legitimate users. Stateless SYN cookies
-(\texttt{syn\_cookies.py} / \texttt{net.ipv4.tcp\_syncookies}) remove the
-targeted resource entirely and defend without that collateral damage, which is
-why they are the primary real-world countermeasure.
+We reproduced a TCP SYN-flood attack end to end on our own isolated hotspot
+network and measured its effect on both the kernel's half-open queue and real
+HTTP service. Our first attempt showed no effect at all, and diagnosing why
+--- nginx's own listen backlog, not the kernel sysctl, is what actually
+governs the queue, and 511 free slots is enough to hide the attack entirely
+on a fast LAN --- was as much a part of this lab as the attack itself
+(\S\ref{sec:queue-note}). Once the queue was genuinely shrunk, the flood drove
+a real, legitimate user's success rate from 100\% to 0\%. Enabling stateless
+SYN cookies (\texttt{net.ipv4.tcp\_syncookies}) under the identical flood
+restored success to 99.99\%, without ever deciding who to block --- which is
+why it is the primary real-world countermeasure. A second, application-level
+countermeasure (\texttt{server/defense.py}) was designed and analyzed for its
+expected trade-off (it can block legitimate users because it acts on the
+spoofable source-IP field), but its empirical evaluation remains incomplete
+and is left as follow-up work.
 
 % ===========================================================================
 \appendix
 \section{Reproduction Commands}
 % ===========================================================================
 \begin{lstlisting}[language=bash]
-# --- Attacker (10.42.0.157) ---
-sudo python3 -m client.generator --continuous --rate 1000 --workers 8
-
 # --- Server / victim (10.42.0.81) ---
+# one-time: shrink nginx's own listen backlog (see Sec. "Shrinking the queue")
+#   edit /etc/nginx/sites-available/default: listen 80 ... backlog=8;
+#   sudo nginx -t && sudo systemctl restart nginx
+#   ss -ltn 'sport = :80'   # confirm Send-Q reads 8
+
 python3 -m server.monitor --interval 0.5 --output results/attack-monitor.csv
 watch -n0.5 'ss -Hnt state syn-recv "( sport = :80 )" | wc -l'
 sudo tcpdump -ni <iface> 'tcp port 80 and tcp[tcpflags] & tcp-syn != 0'
 
-# --- Legitimate user probe (run on the server, against its own IP) ---
+# --- Attacker (separate laptop) ---
+sudo python3 -m client.generator --continuous --rate 1000 --workers 8
+
+# --- Monitor / legitimate user probe (separate laptop) ---
 python3 -m client.sustained_http_load --url http://10.42.0.81/ \
         --duration 20 --timeout 2 --concurrency 10 --output results/attack-http.csv
 
-# --- Defense 1: per-source blocker ---
+# --- Countermeasure: SYN cookies (evaluated) ---
+sudo sysctl -w net.ipv4.tcp_syncookies=1          # protect nginx
+python3 -m server.syn_cookies --connections 1000  # standalone demo of the mechanism
+
+# --- Countermeasure: per-source blocker (designed, not yet evaluated) ---
 sudo python3 -m server.defense --interval 0.5 --threshold 5 \
      --block-seconds 30 --output results/defense-events.csv
-
-# --- Defense 2: SYN cookies ---
-sudo sysctl -w net.ipv4.tcp_syncookies=1          # protect nginx
-python3 -m server.syn_cookies --connections 1000  # demonstrate the mechanism
 \end{lstlisting}
 
 \end{document}

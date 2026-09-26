@@ -48,7 +48,15 @@ the report, noted under "Report needs" below its heading.
    grep -n listen /etc/nginx/sites-available/default   # confirm backlog=8 shows up
    sudo nginx -t
    sudo systemctl restart nginx
+   ss -ltn 'sport = :80'
    ```
+   The `grep` only proves the *config file* says `backlog=8` — it doesn't prove
+   the *running* nginx actually picked it up (that's the exact mistake from
+   before: `reload` silently keeps the old queue size). The `ss -ltn` line
+   after the restart is the real proof: for a LISTEN socket, its `Send-Q`
+   column **is** the configured backlog. If it doesn't read `8`, the restart
+   didn't take — stop and fix this before running any trial, or every result
+   after it is invalid.
 6. On all three laptops, from the project root, make a results folder
    (skip if you're editing in place on each machine already):
    ```bash
@@ -69,10 +77,11 @@ screenshot.
 **Where files end up:** every `results/*-http.csv` file is written on the
 **Monitor** laptop (that's where the probe runs); every `results/*-monitor.csv`
 and `nstat`/`tcpdump` file is written on the **Server**. You'll need both sets
-in one place before filling the report table or building the plot in step 6 —
-`scp` between the laptops if you've got SSH set up, otherwise a USB stick or
-`python3 -m http.server` + a browser download both work fine for a handful of
-CSVs. Do this transfer once at the end (step 6), not after every trial.
+in one place before filling the report table or building the plot — that's
+step 6 (collect) and step 7 (plot) below. `scp` between the laptops if you've
+got SSH set up, otherwise a USB stick or `python3 -m http.server` + a browser
+download both work fine for a handful of CSVs. Do this transfer once at the
+end, not after every trial.
 
 ## 1. Baseline trial — no attack
 
@@ -224,6 +233,20 @@ legitimate users" evidence the report needs. If it doesn't trigger at
 happen — report a null result honestly if that's what you observe.
 
 Stop the attacker, then `Ctrl+C` `defense.py`.
+
+**Important cleanup:** `defense.py` only removes a block automatically when
+its own `--block-seconds` cooldown elapses *while the script is still
+running*. If you `Ctrl+C` it before that happens, any active `iptables` DROP
+rules stay in place forever — including one against the Monitor's own IP if
+it got blocked. Check and clear them before moving on:
+```bash
+sudo iptables -L INPUT -n --line-numbers | grep DROP
+```
+If any of your lab IPs show up, remove that rule by its line number:
+```bash
+sudo iptables -D INPUT <line-number>
+```
+Confirm the Monitor can reach the server again before continuing.
 
 ## 5. `syn_cookies.py` demo — the stateless mechanism itself
 
